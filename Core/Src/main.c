@@ -80,8 +80,9 @@ uint16_t pin_bop2;
 uint16_t pin_pull2;
 
 // 7 seg displays for score
-uint16_t pin_score1;
-uint16_t pin_score2;
+uint16_t pin_score;
+// uint16_t pin_score1;
+// uint16_t pin_score2;
 
 // Buzzer
 uint16_t pin_buzzer;
@@ -106,7 +107,7 @@ void round_manager() {
     HAL_GPIO_WritePin(GPIOA, led_bop, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(GPIOA, led_pull, GPIO_PIN_RESET);
   
-    // reset inputs and outputs (except scores
+    // reset inputs and outputs (except scores)
     // buzz once
 
     // start I/O manager
@@ -127,6 +128,7 @@ void io_manager()
   for (;;) {
     // start player tasks 1 and 2
     // wait.
+    
 
     // determine winner
     HAL_GPIO_WRITEPIN(GPIOA)
