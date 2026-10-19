@@ -151,27 +151,31 @@ static const Pin_t led_pin[PLAYER_COUNT][INPUT_COUNT] = {
 };
 ```
 
-The rest of the program never mentions a pin. This is how the game logic will use it:
+The rest of the program never mentions a pin. This is how the game code uses it
+(see `docs/GAME.md` for the whole game):
 
 ```c
-Board_Init(inputQueue);                         /* once, after osKernelInitialize() */
+Board_Init(playerInputQueue);                   /* once; one queue per player */
 
 Board_LedSet(PLAYER_1, INPUT_BUTTON, true);     /* cue: player 1 must press */
 uint32_t cue_us = Board_NowUs();
 
 InputEvent_t e;
-if (osMessageQueueGet(inputQueue, &e, NULL, deadline_ticks) == osOK) {
+if (osMessageQueueGet(playerInputQueue[PLAYER_1], &e, NULL, ticks) == osOK) {
     uint32_t reaction_us = e.timestamp_us - cue_us;   /* 1 us resolution */
-    /* e.player / e.input tell who did what: correct, wrong or early */
+    /* e.input tells which control the player used */
 }
 
 Board_DisplayScores(score1, score2);            /* 0..9 on the two displays */
 Board_BuzzerTone(880);                          /* beep; Board_BuzzerTone(0) = silent */
+Board_WaitStartButton(osWaitForever);           /* blue button B1 */
 ```
 
-* Button and switch edges arrive as `InputEvent_t` in the queue (timestamped in the interrupt, 30 ms debounce).
-* The pot is **not** an event: the pot task reads `Board_PotRead(player)` periodically (about every 1 ms) and decides when it has reached the target zone.
+* Button and switch edges arrive as `InputEvent_t` in the queue **of the player they belong to**
+  (timestamped in the interrupt, 30 ms debounce).
+* The pot is **not** an event: the player task reads `Board_PotRead(player)` about every 1 ms.
 * `Board_DisplayScores()` and the 595 latch are protected by a mutex, so any task may call them.
+* The blue button B1 (PC13) releases a semaphore: `Board_WaitStartButton()` returns when it is pressed.
 
 ## 6. Things to check on the real board
 

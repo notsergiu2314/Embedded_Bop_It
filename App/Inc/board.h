@@ -13,16 +13,23 @@
 typedef enum { PLAYER_1 = 0, PLAYER_2, PLAYER_COUNT } Player_t;
 typedef enum { INPUT_BUTTON = 0, INPUT_SWITCH, INPUT_POT, INPUT_COUNT } InputType_t;
 
-/* One press / flip. Created in the EXTI interrupt and queued for the game. */
+/* One press / flip. Created in the EXTI interrupt and put in the queue of
+ * the player it belongs to. */
 typedef struct {
     Player_t    player;
     InputType_t input;          /* INPUT_BUTTON or INPUT_SWITCH */
     uint32_t    timestamp_us;   /* TIM2, 1 MHz, wraps every ~71 min */
 } InputEvent_t;
 
-/* Call once from App_Init(), after osKernelInitialize().
- * Every button/switch edge is put into inputQueue (element: InputEvent_t). */
-void Board_Init(osMessageQueueId_t inputQueue);
+/* Call once after osKernelInitialize().
+ * Every button/switch edge of a player is put into that player's queue
+ * (element: InputEvent_t), so each player task only sees its own events. */
+void Board_Init(const osMessageQueueId_t inputQueues[PLAYER_COUNT]);
+
+/* Blue button B1 (start / restart). Waits until it is pressed, true if it was
+ * pressed before the timeout (in kernel ticks). A timeout of 0 only checks, so
+ * it can also be used to throw away an old press. */
+bool Board_WaitStartButton(uint32_t timeout_ticks);
 
 /* Microseconds from the free-running timer. Use it for every timestamp. */
 uint32_t Board_NowUs(void);
