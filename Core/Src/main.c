@@ -31,7 +31,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdbool.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -63,12 +63,18 @@ typedef struct {
   uint32_t player2_time;
 } Time_Result;
 
+// Arguments handed to each player task (xTaskCreate pvParameters)
+typedef struct {
+  QueueHandle_t inputQueue;   // ISR -> player
+  QueueHandle_t resultQueue;  // player -> IO manager
+} Player_Args;
+
 // semaphores and mutexes
 
 static SemaphoreHandle_t gameStateMutex;
 static State gameState;
 
-static const size_t SCORE_THRESHOLD = 3;
+static const size_t SCORE_THRESHOLD = 9;   // first to this score wins (max 9: one display digit)
 static size_t player1_score = 0; 
 static size_t player2_score = 0;
 
@@ -133,7 +139,7 @@ uint32_t random(uint32_t seed)
 
 State get_random_gameState() {
   size_t state_count = 3;
-  return (State) (random(HAL_GetTick() % state_count;))
+  return (State) (random(HAL_GetTick() % state_count));
 }
 
 void buzz_once()
@@ -160,16 +166,16 @@ void round_manager(void *args) {
     buzz_once();
 
     // start I/O manager
-    xTaskNotifyGive(io_manager_handle)
+    xTaskNotifyGive(io_manager_handle);
 
-    ulTaskNotifyTake(pdTRUE, portMAX_Delay)
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     // wait for I/O manager with timing results
     Time_Result timeResult;
-    xQueueReceive(io_manager_result, &timeResult, portMAX_DELAY)
+    xQueueReceive(io_manager_result, &timeResult, portMAX_DELAY);
 
     // determine winner
-    p1_time = timeResult.player1_time;
-    p2_time = timeResult.player2_time;
+    uint32_t p1_time = timeResult.player1_time;
+    uint32_t p2_time = timeResult.player2_time;
     
     //TODO: store timings somewhere
 
@@ -196,12 +202,12 @@ void round_manager(void *args) {
 
 void io_manager(void *args) 
 {
-  player1_value;
-  player2_value;
+  uint32_t player1_value;
+  uint32_t player2_value;
 
   for (;;) {
     // Wait until start notification
-    ulTaskNotifyTake(pdTRUE, portMAX_Delay)
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     
     // pick a random game state.
     if (xSemaphoreTake(gameStateMutex, portMAX_DELAY) == pdTRUE) {
@@ -224,12 +230,11 @@ void io_manager(void *args)
     }
 
     // start player tasks 1 and 2
-    ulTaskNotifyGive(player1_handle)
-    ulTaskNotifyGive(player2_handle)
-`
+    xTaskNotifyGive(player1_handle);
+    xTaskNotifyGive(player2_handle);
     // wait for both players
-    xQueueReceive(player1_result, &player1_value, portMAX_DELAY)
-    xQueueReceive(player2_result, &player2_value, portMAX_DELAY)
+    xQueueReceive(player1_result, &player1_value, portMAX_DELAY);
+    xQueueReceive(player2_result, &player2_value, portMAX_DELAY);
     
     all_leds_off();
 
@@ -238,7 +243,7 @@ void io_manager(void *args)
     // a draw is assumed to be impossible
     // uint32_t winner = 1 + (player2_value  < player1_value);
 
-    buzz_once()
+    buzz_once();
     
 
     
@@ -251,13 +256,14 @@ void io_manager(void *args)
 void player(void *args)
 {
 
-  inputQueue = args.inputQueue;
-  resultQueue = args.resultQueue;
+  Player_Args *player_args = (Player_Args *)args;
+  QueueHandle_t inputQueue = player_args->inputQueue;
+  QueueHandle_t resultQueue = player_args->resultQueue;
   State receivedState;
 
   for (;;) {
     // wait until IO manager notifies start
-    ulTaskNotifyTake(pdTRUE, portMAX_Delay)
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     uint32_t start_time = HAL_GetTick();
     // wait for input
 
@@ -267,13 +273,13 @@ void player(void *args)
         if (xSemaphoreTake(gameStateMutex, portMAX_DELAY) == pdTRUE) {
           // correct input
           if (receivedState == gameState) { 
-            end_time = HAL_GetTick() - start_time;
-            xQueueOverwrite(resultQueue, end_time)
+            uint32_t end_time = HAL_GetTick() - start_time;
+            xQueueOverwrite(resultQueue, &end_time);
             xSemaphoreGive(gameStateMutex); // release mutex
             break; // exit while loop and go back to initial waiting state again
           }
           // release mutex, go back to waiting for input
-          xSemaphoreGive(gameStateMutex)
+          xSemaphoreGive(gameStateMutex);
         }
       }
     }
@@ -307,7 +313,7 @@ void MX_FREERTOS_Init(void);
   */
 int main(void)
 {
-State
+
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -340,7 +346,7 @@ State
 
   /* USER CODE END 2 */
 
-  /* Init schedStateuler */
+  /* Init scheduler */
   osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
   MX_FREERTOS_Init();
 

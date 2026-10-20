@@ -7,18 +7,53 @@ current commit and will drift.
 
 Legend: **done** = exists in `App/`, **partly** = exists but differs from the skeleton, **missing** = nobody has it yet.
 
-## 1. Blockers: the skeleton does not compile yet
+## 1. Status of `main.c`
 
-| # | Problem | Where | Fix |
+`main.c` is the product. `App/` is **excluded from the build** (removed from the CubeIDE source folders in
+`.cproject`) and only stays in the repository as a reference. We do not regenerate from CubeMX for now, so
+code outside the `USER CODE` blocks is tolerated.
+
+**It builds and links.** The compile errors of the first versions were fixed (see "What was a typo" below).
+Choices made for now: a round ends when **both** players have reacted; if nobody reacts nothing happens;
+`SCORE_THRESHOLD` is **9** (one display digit, change it in `main.c`); a tie goes to player 2 (see below).
+
+### It builds, but it does not play yet
+
+| # | What is missing | Where | Note |
 |---|---|---|---|
-| 1 | `enum state { ... }` has no `;` | `main.c:90-92` | add `;` after the closing brace |
-| 2 | `HAL_GPIO_WRITEPIN(GPIOA)` is not a function call | `main.c:134` | `HAL_GPIO_WritePin(port, pin, state);` (see section 2, LED row) |
-| 3 | Everything between `USER CODE END PV` and `Private function prototypes` (lines 96-163) and the three extra `#include`s (lines 28-30) are **outside the `USER CODE` markers**: the next CubeMX "Generate Code" **deletes them** | `main.c` | move into `USER CODE BEGIN PV/PFP/4` blocks, or into a separate `.c` file (safest) |
-| 4 | Tasks are never created, and the functions have the wrong signature (`void f()` instead of `void f(void *argument)`) | `main.c:101-163` | create them with `osThreadNew` inside `MX_FREERTOS_Init()` (`USER CODE BEGIN RTOS_THREADS`), see [game.c:383](../App/Src/game.c#L383) |
-| 5 | **Two games would run at once.** `freertos.c` on this branch calls `Game_Init()`, which starts the `App/` tasks. As soon as the skeleton tasks are created too, both fight over the LEDs, buzzer and displays | `Core/Src/freertos.c` (`RTOS_THREADS`) | remove the `Game_Init();` call once we switch to the skeleton, or keep it and drop the skeleton |
-| 6 | `led_twist`, `pin_bop1`, ... are uninitialised `uint16_t`s and `GPIOA` is hard-coded, but the pins are on GPIOA, B and C | `main.c:67-88, 106-108` | use the `*_Pin` / `*_GPIO_Port` macros from `main.h`, or the tables in `board.c` |
+| 1 | **Nothing is created.** No task, queue or mutex exists, so nothing runs. `gameStateMutex` and all queue handles are uninitialised. | `main.c` | create them in `MX_FREERTOS_Init()` (`USER CODE BEGIN RTOS_THREADS`) with `xTaskCreate`, `xQueueCreate`, `xSemaphoreCreateMutex`. The player tasks get a `Player_Args *` (`inputQueue`, `resultQueue`). Reference: [game.c:383](../App/Src/game.c#L383) |
+| 2 | **Pin variables are all 0** and the LED code hard-codes `GPIOA`. The pins are on ports A, B and C. | `led_*`, `pin_*`, `all_leds_off()`, `io_manager()` | use the `*_Pin` / `*_GPIO_Port` macros from `main.h`. Cue LEDs: button = D9 (PC7), switch = D15 (PB8), pot = D14 (PB9). Inputs and the rest: [PINOUT.md](PINOUT.md) |
+| 3 | **`get_random_gameState()` returns a huge number**, not 0-2 (`random()` is cast straight to `State`), and the seed `HAL_GetTick() % 3` only has 3 values (seed 0 gives 0 forever). | `main.c` | return `random(...) % 3` and seed from a larger value. `random` is also a libc name; rename if it ever clashes. |
+| 4 | **Round manager waits twice, for things nobody sends.** It does `ulTaskNotifyTake` on its own notification (nobody gives it) and waits on `io_manager_result` (the I/O manager never sends to it). | `round_manager()`, `io_manager()` | pick one: queue (send a `Time_Result` at the end of `io_manager`) and drop the `ulTaskNotifyTake` in `round_manager` |
+| 5 | **TWIST (pot) is not an interrupt.** The callback maps `pin_twist1/2` as if it were. | `HAL_GPIO_EXTI_Callback()` | poll the ADC in the player task. Reference: [game.c:131, 150](../App/Src/game.c#L131) |
+| 6 | **Stale input and no debounce.** Messages from before the round stay in `playerN_input`, so an early press counts, and one press can queue several events. | player task, callback | `xQueueReset(playerN_input)` right before notifying the players; debounce in the callback. Reference: [game.c:207](../App/Src/game.c#L207), [board.c:171](../App/Src/board.c#L171) |
+| 7 | Score manager, displays, buzzer, winstate, winner indication, and storing the timings are still TODO. | `score_manager()`, `buzz_once()` | [score.c](../App/Src/score.c), `Board_DisplayScores` ([board.c:141](../App/Src/board.c#L141)), `Board_BuzzerTone` ([board.c:157](../App/Src/board.c#L157)) |
+
+### Known behaviour we accepted for now
+- **Tie** (both players measure the same time in ms): `if (p1_time < p2_time)` is false, so **player 2 gets the point**. With 1 ms resolution this can happen in roughly 1 round out of 70 when two players react about equally fast (rough estimate, not measured).
+- **Nobody reacts / one player never reacts:** the I/O manager waits forever for both results, so the round never ends.
+- Times are measured in the player tasks with `HAL_GetTick()` (1 ms), starting when the task wakes up. Player 1 is notified first, so it starts a little earlier than player 2.
+
+### What was a typo and what is a real FreeRTOS name
+| Written | Was | Now |
+|---|---|---|
+| `ulTaskNotifyTake(...)` | **real**: the *receiver* waits for a notification | unchanged |
+| `xTaskNotifyGive(task)` | **real**: the *sender* gives a notification | unchanged |
+| `ulTaskNotifyGive(task)` | typo, this name does not exist | `xTaskNotifyGive(task);` |
+| `portMAX_Delay` | typo (case) | `portMAX_DELAY` |
+| `xQueueOverwrite(q, end_time)` | wrong call: the 2nd argument is a **pointer** to the item (and the queue length must be 1) | `xQueueOverwrite(q, &end_time);` |
+| `p1_time`, `end_time`, `player1_value`, ... | used without a type | declared as `uint32_t` |
+| `args.inputQueue` | `args` is a `void *`, it has no fields | `Player_Args` struct, read through a cast |
+| stray `State` line in `main()`, backtick, `schedStateuler` | accidental typing | removed / restored |
+| `true` | needs `<stdbool.h>` | included in `USER CODE BEGIN Includes` |
+| missing `;` | in about ten places | added |
+
+Note: `xTaskNotifyGive` / `ulTaskNotifyTake` pair up like a semaphore: Give increments a counter in the target task,
+Take (with `pdTRUE`) waits until it is non-zero and clears it.
 
 ## 2. Mapping: skeleton -> `App/` code
+
+*`App/` is not built any more. The rows below point to it as a reference implementation; the "skeleton" column is the original outline, `main.c` has since been filled in (see section 1).*
 
 Names: **BOP** = push button = `INPUT_BUTTON`, **PULL** = slide switch = `INPUT_SWITCH`,
 **TWIST** = potentiometer = `INPUT_POT` ([board.h:14](../App/Inc/board.h#L14)).
