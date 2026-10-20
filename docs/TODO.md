@@ -25,18 +25,18 @@ Choices made for now: a round ends when **both** players have reacted; if nobody
 | 2 | Real pins | LEDs: `led_bop` D9 (PC7), `led_pull` D15 (PB8), `led_twist` D14 (PB9), through `led_write()`. Inputs: `pin_bop1/2` = PA10 / PA8, `pin_pull1/2` = PB4 / PA9. `pin_twist1/2` are 0 (the pot has no interrupt pin). |
 | 3 | Random | `random_next()` keeps its state (xorshift32, seeded once from the tick + SysTick). `get_random_gameState()` picks from the `playable` list. The seed is only the start-up time, so the sequence can repeat after a reset. |
 | 4 | One signal between the managers | The round manager's extra `ulTaskNotifyTake` is gone. The I/O manager sends a `Time_Result` through `io_manager_result`. |
+| 5 | **TWIST (pot)** | `game_init()` starts the ADC with DMA (`HAL_ADC_Start_DMA`, circular) and switches the DMA interrupt off. `pot_monitor` (task, every `POT_POLL_MS` = 1 ms) compares `pot_raw[]` with the position at the cue (`pot_arm()`, called by the I/O manager) and, when a pot moved `TWIST_THRESHOLD` (1000 of 4095) in either direction, puts a `TWIST` message in that player's input queue, like the EXTI callback does for buttons. The player tasks are unchanged. Accuracy about 1 ms. |
+| 6 | **Debounce and stale input** | In `HAL_GPIO_EXTI_Callback`: after an accepted edge, further edges on the same pin are ignored for `DEBOUNCE_MS` (30 ms). The I/O manager calls `xQueueReset` on both player input queues right before the cue, so early presses and leftover bounces do not count. |
 
 Extras needed to make it usable (change or remove them freely):
-- `TWIST_ENABLED` is **0**: until the pot is implemented a TWIST round could never end, so only BOP and PULL are asked. Set it to 1 once TWIST works.
+- `TWIST_ENABLED` is **1**. Set it to 0 to ask only BOP and PULL (e.g. to test without the pots).
 - `ROUND_PAUSE_MS` (1000): pause before each round, otherwise the next LED lights the instant the previous round ends.
-- `score_manager` now blocks on `ulTaskNotifyTake` (its first TODO line); an empty loop would have used all the CPU.
+- `score_manager` blocks on `ulTaskNotifyTake` (its first TODO line); an empty loop would have used all the CPU.
 
 ### Still missing
 
 | # | What is missing | Where | Note |
 |---|---|---|---|
-| 5 | **TWIST (pot) is not an interrupt.** The callback maps `pin_twist1/2` (0 now). | `HAL_GPIO_EXTI_Callback()` | read the ADC and send a `TWIST` message into the player queue when the pot moved. Reference: [game.c:131, 150](../App/Src/game.c#L131) |
-| 6 | **Stale input and no debounce.** Messages from before the round stay in `playerN_input`, so an early press counts, and one press can queue several events. | player task, callback | `xQueueReset(playerN_input)` right before notifying the players; debounce in the callback. Reference: [game.c:207](../App/Src/game.c#L207), [board.c:171](../App/Src/board.c#L171) |
 | 7 | Score manager body, displays, buzzer, winstate, winner indication, and storing the timings are still TODO. | `score_manager()`, `buzz_once()` | [score.c](../App/Src/score.c), `Board_DisplayScores` ([board.c:141](../App/Src/board.c#L141)), `Board_BuzzerTone` ([board.c:157](../App/Src/board.c#L157)). The round manager also never wakes the score manager yet. |
 | 8 | Nothing is printed, so the only feedback is the cue LED. | | a UART line per round (reaction times, score) would help testing |
 

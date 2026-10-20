@@ -70,14 +70,18 @@ typedef struct {
 } Player_Args;
 
 // Game settings
-#define TWIST_ENABLED   0      // 1 once the pot (TWIST) input is implemented. With 0 only BOP and PULL are asked.
+#define TWIST_ENABLED   1      // 0 = TWIST is never asked (only BOP and PULL), e.g. to test without the pots
 #define ROUND_PAUSE_MS  1000   // pause before every round so the players can get ready
+#define DEBOUNCE_MS     30     // after a button/switch edge, further edges on that pin are ignored for this long
+#define TWIST_THRESHOLD 1000   // ADC counts (of 4095) a pot must move from its position at the cue
+#define POT_POLL_MS     1      // how often the pots are checked
 
 // Task settings: priorities are CMSIS values (24 = normal, 32 = above normal), stacks are in 4-byte words
 #define PRIO_PLAYER     osPriorityAboveNormal
 #define PRIO_IO         osPriorityAboveNormal
 #define PRIO_ROUND      osPriorityNormal
 #define PRIO_SCORE      osPriorityBelowNormal
+#define PRIO_POT        osPriorityAboveNormal
 #define STACK_WORDS     256
 
 // semaphores and mutexes
@@ -97,6 +101,7 @@ TaskHandle_t io_manager_handle = NULL;
 TaskHandle_t player1_handle = NULL;
 TaskHandle_t player2_handle = NULL;
 TaskHandle_t score_manager_handle = NULL;
+TaskHandle_t pot_monitor_handle = NULL;
 
 // Handles for queues
 
@@ -193,6 +198,56 @@ void all_leds_off()
   led_write(&led_pull, GPIO_PIN_RESET);
 }
 
+// ---- TWIST: the pots ----
+// The ADC + DMA keep pot_raw up to date (pot_raw[0] = player 1 on PA0, pot_raw[1] = player 2 on PA1).
+// A pot has no interrupt, so pot_monitor() checks it every POT_POLL_MS and puts a TWIST message into the
+// player's input queue, exactly like the EXTI callback does for a button. The players need no special code.
+static volatile uint16_t pot_raw[2];
+static volatile uint16_t pot_ref[2];      // pot position at the cue
+static volatile bool pot_armed = false;   // true while a TWIST round is running
+static volatile bool pot_fired[2];        // this pot already reported its move in this round
+
+// remember where both pots are now (called by the IO manager at the cue of a TWIST round)
+void pot_arm(void)
+{
+  pot_ref[0] = pot_raw[0];
+  pot_ref[1] = pot_raw[1];
+  pot_fired[0] = false;
+  pot_fired[1] = false;
+  pot_armed = true;
+}
+
+void pot_disarm(void)
+{
+  pot_armed = false;
+}
+
+void pot_monitor(void *args)
+{
+  (void)args;
+  TickType_t last_wake = xTaskGetTickCount();
+
+  for (;;) {
+    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(POT_POLL_MS));
+    if (!pot_armed) {
+      continue;
+    }
+
+    for (int p = 0; p < 2; p++) {
+      int32_t delta = (int32_t)pot_raw[p] - (int32_t)pot_ref[p];
+      if (delta < 0) {
+        delta = -delta;
+      }
+      // moved far enough (any direction), and not reported yet
+      if (!pot_fired[p] && delta >= TWIST_THRESHOLD) {
+        pot_fired[p] = true;
+        State state = TWIST;
+        xQueueSend(p == 0 ? player1_input : player2_input, &state, 0);
+      }
+    }
+  }
+}
+
 void round_manager(void *args) {
   // initialize all relevant registers, pins, and variables
   for (;;) {
@@ -256,6 +311,10 @@ void io_manager(void *args)
       xSemaphoreGive(gameStateMutex);
     }
 
+    // Throw away presses from before the cue (early presses, contact bounce of the last round)
+    xQueueReset(player1_input);
+    xQueueReset(player2_input);
+
     // Turn on the correct LEDs
 
     switch (gameState) {
@@ -270,12 +329,18 @@ void io_manager(void *args)
       break;
     }
 
+    // TWIST: remember where the pots are at the cue
+    if (gameState == TWIST) {
+      pot_arm();
+    }
+
     // start player tasks 1 and 2
     xTaskNotifyGive(player1_handle);
     xTaskNotifyGive(player2_handle);
     // wait for both players
     xQueueReceive(player1_result, &player1_value, portMAX_DELAY);
     xQueueReceive(player2_result, &player2_value, portMAX_DELAY);
+    pot_disarm();
     
     all_leds_off();
 
@@ -345,6 +410,13 @@ static Player_Args player2_args;
 
 void game_init(void)
 {
+  // ADC + DMA (circular) keep pot_raw up to date. The DMA interrupt is not needed and would fire
+  // about 200 000 times per second, so it is switched off in the NVIC (the transfers keep running).
+  if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)pot_raw, 2) != HAL_OK) {
+    Error_Handler();
+  }
+  HAL_NVIC_DisableIRQ(DMA2_Stream0_IRQn);
+
   gameStateMutex = xSemaphoreCreateMutex();
 
   // ISR -> players: one State per button press, a few can wait
@@ -370,7 +442,8 @@ void game_init(void)
       xTaskCreate(player, "player1", STACK_WORDS, &player1_args, PRIO_PLAYER, &player1_handle) != pdPASS ||
       xTaskCreate(player, "player2", STACK_WORDS, &player2_args, PRIO_PLAYER, &player2_handle) != pdPASS ||
       xTaskCreate(score_manager, "score_manager", STACK_WORDS, NULL, PRIO_SCORE, &score_manager_handle) != pdPASS ||
-      xTaskCreate(round_manager, "round_manager", STACK_WORDS, NULL, PRIO_ROUND, &round_manager_handle) != pdPASS) {
+      xTaskCreate(round_manager, "round_manager", STACK_WORDS, NULL, PRIO_ROUND, &round_manager_handle) != pdPASS ||
+      xTaskCreate(pot_monitor, "pot_monitor", 128, NULL, PRIO_POT, &pot_monitor_handle) != pdPASS) {
     Error_Handler();
   }
 }
@@ -546,6 +619,16 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     } else {
         return;  // Irrelevant
     }
+
+    // Debounce: the first edge is the real press. A contact bounces for a few ms, so ignore
+    // further edges on the same pin for DEBOUNCE_MS (no delay is added to the real press).
+    static uint32_t last_edge_ms[16];
+    uint32_t line = __builtin_ctz(GPIO_Pin);
+    uint32_t now = HAL_GetTick();
+    if ((now - last_edge_ms[line]) < DEBOUNCE_MS) {
+      return;
+    }
+    last_edge_ms[line] = now;
 
     if (queue != NULL) {
       xQueueSendFromISR(queue, &state, &higher_priority_task_woken);
