@@ -25,6 +25,9 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
+#include "semphr.h"
+#include "stm32f4xx_hal.h"
+#include "timers.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -49,8 +52,116 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+// Handles for timers
+
+// Handles for tasks
+TaskHandle_t round_manager_handle = NULL;
+TaskHandle_t io_manager_handle = NULL;
+TaskHandle_t player1_handle = NULL;
+TaskHandle_t player2_handle = NULL;
+TaskHandle_t score_manager_handle = NULL;
+
+
+// Enum aliases for various pins.
+
+// Indicator lights
+uint16_t led_twist;
+uint16_t led_bop;
+uint16_t led_pull;
+
+// Inputs Player 1 
+uint16_t pin_twist1;
+uint16_t pin_bop1;
+uint16_t pin_pull1;
+
+// Inputs player 2
+uint16_t pin_twist2;
+uint16_t pin_bop2;
+uint16_t pin_pull2;
+
+// 7 seg displays for score
+uint16_t pin_score;
+// uint16_t pin_score1;
+// uint16_t pin_score2;
+
+// Buzzer
+uint16_t pin_buzzer;
+
+enum state {
+  BOP, TWIST, PULL
+}
 
 /* USER CODE END PV */
+
+void buzz_once()
+{
+  //TODO: buzzer implementation
+}
+
+void round_manager() {
+  // initialize all relevant registers, pins, and variables
+  for (;;) {
+
+    // Turn off all LEDs
+    HAL_GPIO_WritePin(GPIOA, led_twist, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOA, led_bop, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOA, led_pull, GPIO_PIN_RESET);
+  
+    // reset inputs and outputs (except scores)
+    // buzz once
+
+    // start I/O manager
+
+    // wait for I/O manager
+
+    // update scores/score manager
+
+    // if winner threshold reached
+    // enter winstate
+  }
+}
+
+
+void io_manager() 
+{
+  // Wait for round manager notification
+  for (;;) {
+    // start player tasks 1 and 2
+    // wait.
+    
+
+    // determine winner
+    HAL_GPIO_WRITEPIN(GPIOA)
+    // winner indication (buzz, flash LEDs?)
+    // notify round manager
+  }
+}
+
+void playerLogic(/*TODO: Task handles*/)
+{
+  for (;;) {
+
+  }
+}
+
+void player1() 
+{
+  playerLogic();
+}
+
+void player2() 
+{
+  playerLogic();
+}
+
+void score_manager() {
+  for (;;) {
+    // wait until notification is received
+    // read score mutex 
+    // update 7 seg displays
+  }
+}
+
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
