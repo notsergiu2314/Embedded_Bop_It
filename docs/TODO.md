@@ -27,6 +27,13 @@ Choices made for now: a round ends when **both** players have reacted; if nobody
 | 4 | One signal between the managers | The round manager's extra `ulTaskNotifyTake` is gone. The I/O manager sends a `Time_Result` through `io_manager_result`. |
 | 5 | **TWIST (pot)** | `game_init()` starts the ADC with DMA (`HAL_ADC_Start_DMA`, circular) and switches the DMA interrupt off. `pot_monitor` (task, every `POT_POLL_MS` = 1 ms) compares `pot_raw[]` with the position at the cue (`pot_arm()`, called by the I/O manager) and, when a pot moved `TWIST_THRESHOLD` (1000 of 4095) in either direction, puts a `TWIST` message in that player's input queue, like the EXTI callback does for buttons. The player tasks are unchanged. Accuracy about 1 ms. |
 | 6 | **Debounce and stale input** | In `HAL_GPIO_EXTI_Callback`: after an accepted edge, further edges on the same pin are ignored for `DEBOUNCE_MS` (30 ms). The I/O manager calls `xQueueReset` on both player input queues right before the cue, so early presses and leftover bounces do not count. |
+| 7 | **Time limit and difficulty** | The limit starts at `ROUND_TIMEOUT_START_MS` (3000) and shrinks by `ROUND_TIMEOUT_STEP_MS` (100) each round, down to `ROUND_TIMEOUT_MIN_MS` (1000). The round manager sets `round_timeout_ms`; each player listens for the limit plus `LATE_GRACE_MS` (500) and then reports `NO_REACTION`, so a round can no longer hang. |
+| 8 | **Correct / late / none** | The round manager classifies each reaction: in time, **late** (correct input after the limit, no point) or **none**. The faster in-time player scores. A wrong input is still just ignored by the player task; an early press is flushed. |
+| 9 | **Best reaction time** | `best_time[2]`, updated every round for in-time reactions (the loser's time counts too), reset at a new game. |
+| 10 | **UART log** (115200, ST-LINK COM port) | Only the round manager prints (`uart_printf`): banner with free heap, one line per round with the cue, both reactions, who scored, the score and the best times, and the winner at the end. |
+| 11 | **Score manager and displays** | `scoreMutex` protects the scores. The round manager changes them and notifies the score manager, which reads them and calls `display_show()` (two 595s on SPI1, player 1 byte first). `SEG_COMMON_ANODE` for the display type. |
+| 12 | **Buzzer and win state** | `buzzer_tone()` / `buzz()` / `buzz_once()` (TIM4 PWM, 1 kHz, 100 ms) at the start of a round and when it ends. At the end of a game: fanfare, all LEDs blink, winner printed. |
+| 13 | **Start / restart with B1** | The blue button wakes the round manager (EXTI callback, debounced). The game waits for it at boot and after every game, and the first random seed then depends on when the button was pressed. |
 
 Extras needed to make it usable (change or remove them freely):
 - `TWIST_ENABLED` is **1**. Set it to 0 to ask only BOP and PULL (e.g. to test without the pots).
@@ -35,15 +42,19 @@ Extras needed to make it usable (change or remove them freely):
 
 ### Still missing
 
-| # | What is missing | Where | Note |
-|---|---|---|---|
-| 7 | Score manager body, displays, buzzer, winstate, winner indication, and storing the timings are still TODO. | `score_manager()`, `buzz_once()` | [score.c](../App/Src/score.c), `Board_DisplayScores` ([board.c:141](../App/Src/board.c#L141)), `Board_BuzzerTone` ([board.c:157](../App/Src/board.c#L157)). The round manager also never wakes the score manager yet. |
-| 8 | Nothing is printed, so the only feedback is the cue LED. | | a UART line per round (reaction times, score) would help testing |
+| What | Note |
+|---|---|
+| **Wrong and early presses are not detected, only ignored.** | The criteria want them told apart. Count them per player (the early ones are in the queue just before `xQueueReset`) and print them. Penalties later. |
+| **Order of near-simultaneous reactions** | Times are whole ms measured in the player tasks (player 1 is notified a moment before player 2) and a tie goes to player 2. Fix later with the TIM2 µs counter and a timestamp in the ISR. The pot is only checked every 1 ms. |
+| **More statistics** | Only the best time per player. Average, worst and per-action times later. |
+| **Nothing has run on the board yet.** | First test: flash, open the serial terminal, press B1. |
 
 ### Known behaviour we accepted for now
-- **Tie** (both players measure the same time in ms): `if (p1_time < p2_time)` is false, so **player 2 gets the point**. With 1 ms resolution this can happen in roughly 1 round out of 70 when two players react about equally fast (rough estimate, not measured).
-- **Nobody reacts / one player never reacts:** the I/O manager waits forever for both results, so the round never ends.
-- Times are measured in the player tasks with `HAL_GetTick()` (1 ms), starting when the task wakes up. Player 1 is notified first, so it starts a little earlier than player 2.
+- **Tie** (both players have the same time in ms): `p1_time < p2_time` is false, so **player 2 gets the point**.
+- **Nobody reacts in time:** the round ends after the limit + `LATE_GRACE_MS`, nobody scores, the next round starts.
+- A player who reacts early waits (cue LED on) until the other has reacted or the limit + grace has passed.
+- Times are measured in the player tasks with `HAL_GetTick()` (1 ms), starting when the task wakes up.
+- A press on a cue that was not asked still fires its interrupt: the callback queues it, and the player task throws it away because it does not match `gameState`.
 
 ### What was a typo and what is a real FreeRTOS name
 | Written | Was | Now |

@@ -32,6 +32,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdbool.h>
+#include <stdarg.h>
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -76,6 +78,18 @@ typedef struct {
 #define TWIST_THRESHOLD 1000   // ADC counts (of 4095) a pot must move from its position at the cue
 #define POT_POLL_MS     1      // how often the pots are checked
 
+// Round timing: the time a player has to react after the cue shrinks every round
+#define ROUND_TIMEOUT_START_MS  3000
+#define ROUND_TIMEOUT_STEP_MS   100     // shorter by this much every round
+#define ROUND_TIMEOUT_MIN_MS    1000
+#define LATE_GRACE_MS           500     // after the limit a correct input is still noticed and reported as "late" (no point). 0 = off
+#define NO_REACTION             0xFFFFFFFFu   // "reaction time" of a player who did not react at all
+
+// Outputs
+#define SEG_COMMON_ANODE  0     // set to 1 if the 7-segment displays are common anode
+#define BEEP_HZ           1000
+#define BEEP_MS           100
+
 // Task settings: priorities are CMSIS values (24 = normal, 32 = above normal), stacks are in 4-byte words
 #define PRIO_PLAYER     osPriorityAboveNormal
 #define PRIO_IO         osPriorityAboveNormal
@@ -83,6 +97,7 @@ typedef struct {
 #define PRIO_SCORE      osPriorityBelowNormal
 #define PRIO_POT        osPriorityAboveNormal
 #define STACK_WORDS     256
+#define STACK_ROUND_WORDS 512   // the round manager formats text for the UART log
 
 // semaphores and mutexes
 
@@ -92,6 +107,10 @@ static State gameState;
 static const size_t SCORE_THRESHOLD = 9;   // first to this score wins (max 9: one display digit)
 static size_t player1_score = 0; 
 static size_t player2_score = 0;
+static SemaphoreHandle_t scoreMutex;     // protects the two scores (round manager writes, score manager reads)
+
+static uint32_t best_time[2] = { NO_REACTION, NO_REACTION };   // best (shortest) on-time reaction of each player, in ms
+static volatile uint32_t round_timeout_ms = ROUND_TIMEOUT_START_MS;   // time to react in this round (set by the round manager)
 
 // Handles for timers
 
@@ -181,9 +200,29 @@ State get_random_gameState() {
   return playable[random_next() % (sizeof(playable) / sizeof(playable[0]))];
 }
 
+// ---- Buzzer: passive piezo, TIM4 channel 1 PWM on PB6. The timer counts at 1 MHz. ----
+void buzzer_tone(uint32_t hz)
+{
+  if (hz == 0) {
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 0);          // silent
+    return;
+  }
+  uint32_t period = 1000000u / hz;
+  __HAL_TIM_SET_AUTORELOAD(&htim4, period - 1);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, period / 2);   // 50 % duty
+}
+
+void buzz(uint32_t hz, uint32_t ms)
+{
+  buzzer_tone(hz);
+  vTaskDelay(pdMS_TO_TICKS(ms));
+  buzzer_tone(0);
+}
+
+// One short beep. Called by the round manager and by the IO manager, but never at the same time.
 void buzz_once()
 {
-  //TODO: buzzer implementation
+  buzz(BEEP_HZ, BEEP_MS);
 }
 
 void led_write(const Pin *led, GPIO_PinState state)
@@ -196,6 +235,42 @@ void all_leds_off()
   led_write(&led_twist, GPIO_PIN_RESET);
   led_write(&led_bop, GPIO_PIN_RESET);
   led_write(&led_pull, GPIO_PIN_RESET);
+}
+
+// ---- 7-segment displays: two 74HC595 chained on SPI1 (right chip = player 2, left chip = player 1) ----
+// bit0 = segment a ... bit6 = g (595 outputs QA..QG)
+static const uint8_t seg_digit[10] = { 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
+
+static uint8_t seg_pattern(size_t digit)
+{
+  uint8_t v = seg_digit[digit > 9 ? 9 : digit];
+#if SEG_COMMON_ANODE
+  v = (uint8_t)~v;
+#endif
+  return v;
+}
+
+// Only the score manager calls this once the scheduler runs.
+void display_show(size_t score1, size_t score2)
+{
+  // the first byte clocked out ends up in the last chip of the chain: player 1 (left) goes first
+  uint8_t frame[2] = { seg_pattern(score1), seg_pattern(score2) };
+  HAL_SPI_Transmit(&hspi1, frame, 2, 10);
+  HAL_GPIO_WritePin(LATCH_595_GPIO_Port, LATCH_595_Pin, GPIO_PIN_SET);    // outputs take the new bits
+  HAL_GPIO_WritePin(LATCH_595_GPIO_Port, LATCH_595_Pin, GPIO_PIN_RESET);
+}
+
+// ---- UART log (115200 baud, ST-LINK virtual COM port). Only the round manager prints. ----
+void uart_printf(const char *fmt, ...)
+{
+  char buf[160];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+  if (n > 0) {
+    HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)(n < (int)sizeof buf ? n : (int)sizeof buf - 1), 100);
+  }
 }
 
 // ---- TWIST: the pots ----
@@ -248,50 +323,158 @@ void pot_monitor(void *args)
   }
 }
 
+// Time a player has to react in this round: it shrinks every round, down to a minimum
+static uint32_t timeout_for_round(uint32_t round)
+{
+  uint32_t cut = (round - 1) * ROUND_TIMEOUT_STEP_MS;
+  uint32_t max_cut = ROUND_TIMEOUT_START_MS - ROUND_TIMEOUT_MIN_MS;
+  return (cut >= max_cut) ? ROUND_TIMEOUT_MIN_MS : (ROUND_TIMEOUT_START_MS - cut);
+}
+
+typedef enum {
+  REACTION_NONE,   // the player did not react at all
+  REACTION_LATE,   // correct input, but after the time limit
+  REACTION_OK      // correct input in time
+} Reaction;
+
+static Reaction classify(uint32_t time_ms, uint32_t timeout_ms)
+{
+  if (time_ms == NO_REACTION) {
+    return REACTION_NONE;
+  }
+  return (time_ms > timeout_ms) ? REACTION_LATE : REACTION_OK;
+}
+
+// text for the log: "312 ms", "late (3105 ms)" or "none"
+static void format_reaction(char *buf, size_t len, uint32_t time_ms, Reaction kind)
+{
+  if (kind == REACTION_OK) {
+    snprintf(buf, len, "%lu ms", (unsigned long)time_ms);
+  } else if (kind == REACTION_LATE) {
+    snprintf(buf, len, "late (%lu ms)", (unsigned long)time_ms);
+  } else {
+    snprintf(buf, len, "none");
+  }
+}
+
+static const char *state_name(State state)
+{
+  switch (state) {
+    case BOP:   return "BOP";
+    case TWIST: return "TWIST";
+    default:    return "PULL";
+  }
+}
+
 void round_manager(void *args) {
-  // initialize all relevant registers, pins, and variables
+  (void)args;
+
   for (;;) {
+    // ---- wait for the blue button B1 (the EXTI callback gives this task a notification) ----
+    uart_printf("\r\n=== Bop-It ===  press the blue button to start (first to %u wins, free heap %u bytes)\r\n",
+                (unsigned)SCORE_THRESHOLD, (unsigned)xPortGetFreeHeapSize());
+    ulTaskNotifyTake(pdTRUE, 0);              // forget presses from before
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-    // Turn off all LEDs
+    // ---- new game: scores and best times back to zero ----
+    xSemaphoreTake(scoreMutex, portMAX_DELAY);
+    player1_score = 0;
+    player2_score = 0;
+    xSemaphoreGive(scoreMutex);
+    xTaskNotifyGive(score_manager_handle);    // the displays show 0 - 0
+    best_time[0] = NO_REACTION;
+    best_time[1] = NO_REACTION;
+
+    int game_winner = 0;                      // 0 = the game is still running
+    for (uint32_t round = 1; game_winner == 0; round++) {
+
+      // Turn off all LEDs
+      all_leds_off();
+
+      // short pause so the players can get ready
+      vTaskDelay(pdMS_TO_TICKS(ROUND_PAUSE_MS));
+
+      // time to react in this round (the players read it when they are started)
+      round_timeout_ms = timeout_for_round(round);
+
+      // buzz once: the round starts
+      buzz_once();
+
+      // start I/O manager
+      xTaskNotifyGive(io_manager_handle);
+
+      // wait for I/O manager with timing results (the result queue is the only signal)
+      Time_Result timeResult;
+      xQueueReceive(io_manager_result, &timeResult, portMAX_DELAY);
+
+      // classify both reactions: in time, late (after the limit) or none at all
+      uint32_t p1_time = timeResult.player1_time;
+      uint32_t p2_time = timeResult.player2_time;
+      Reaction r1 = classify(p1_time, round_timeout_ms);
+      Reaction r2 = classify(p2_time, round_timeout_ms);
+
+      // determine winner: the faster of the players who were in time. Late or no reaction = no point.
+      int winner = 0;                         // 0 = nobody scores this round
+      if (r1 == REACTION_OK && r2 == REACTION_OK) {
+        winner = (p1_time < p2_time) ? 1 : 2; // equal times: player 2 (ties are not handled yet)
+      } else if (r1 == REACTION_OK) {
+        winner = 1;
+      } else if (r2 == REACTION_OK) {
+        winner = 2;
+      }
+
+      // best reaction time of each player (in-time reactions only)
+      if (r1 == REACTION_OK && p1_time < best_time[0]) {
+        best_time[0] = p1_time;
+      }
+      if (r2 == REACTION_OK && p2_time < best_time[1]) {
+        best_time[1] = p2_time;
+      }
+
+      // update scores and tell the score manager
+      xSemaphoreTake(scoreMutex, portMAX_DELAY);
+      if (winner == 1) {
+        player1_score++;
+      } else if (winner == 2) {
+        player2_score++;
+      }
+      size_t score1 = player1_score;
+      size_t score2 = player2_score;
+      xSemaphoreGive(scoreMutex);
+      xTaskNotifyGive(score_manager_handle);
+
+      // log the round
+      char t1[24], t2[24], b1[24], b2[24];
+      format_reaction(t1, sizeof t1, p1_time, r1);
+      format_reaction(t2, sizeof t2, p2_time, r2);
+      format_reaction(b1, sizeof b1, best_time[0], best_time[0] == NO_REACTION ? REACTION_NONE : REACTION_OK);
+      format_reaction(b2, sizeof b2, best_time[1], best_time[1] == NO_REACTION ? REACTION_NONE : REACTION_OK);
+      uart_printf("Round %lu (limit %lu ms) %s: P1 %s | P2 %s | %s | score %u-%u | best P1 %s, P2 %s\r\n",
+                  (unsigned long)round, (unsigned long)round_timeout_ms, state_name(gameState),
+                  t1, t2,
+                  winner == 1 ? "P1 scores" : (winner == 2 ? "P2 scores" : "nobody"),
+                  (unsigned)score1, (unsigned)score2, b1, b2);
+
+      // if winner threshold reached: enter winstate
+      if (score1 >= SCORE_THRESHOLD) {
+        game_winner = 1;
+      } else if (score2 >= SCORE_THRESHOLD) {
+        game_winner = 2;
+      }
+    }
+
+    // ---- win state: log, fanfare with blinking LEDs, then back to waiting for B1 ----
     all_leds_off();
-
-    // short pause so the players can get ready
-    vTaskDelay(pdMS_TO_TICKS(ROUND_PAUSE_MS));
-
-    // reset inputs and outputs (except scores)
-    // buzz once
-    buzz_once();
-
-    // start I/O manager
-    xTaskNotifyGive(io_manager_handle);
-
-    // wait for I/O manager with timing results (the result queue is the only signal)
-    Time_Result timeResult;
-    xQueueReceive(io_manager_result, &timeResult, portMAX_DELAY);
-
-    // determine winner
-    uint32_t p1_time = timeResult.player1_time;
-    uint32_t p2_time = timeResult.player2_time;
-    
-    //TODO: store timings somewhere
-
-    if (p1_time < p2_time) {
-      player1_score++;
-    } else {
-      player2_score++;
+    uart_printf("*** Player %d wins! ***\r\n", game_winner);
+    static const uint32_t notes[] = { 523, 659, 784, 1047, 784, 1047 };
+    for (unsigned i = 0; i < sizeof(notes) / sizeof(notes[0]); i++) {
+      GPIO_PinState on = (i % 2 == 0) ? GPIO_PIN_SET : GPIO_PIN_RESET;
+      led_write(&led_twist, on);
+      led_write(&led_bop, on);
+      led_write(&led_pull, on);
+      buzz(notes[i], 150);
     }
-
-    //TODO: display scores
-    // update scores/score manager
-
-    // if winner threshold reached
-
-    if (player1_score >= SCORE_THRESHOLD) {
-      //TODO: winstate
-    } else if (player2_score >= SCORE_THRESHOLD) {
-      // TODO: winstate
-    }
-    // enter winstate
+    all_leds_off();
   }
 }
 
@@ -373,33 +556,49 @@ void player(void *args)
     // wait until IO manager notifies start
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     uint32_t start_time = HAL_GetTick();
-    // wait for input
 
-    while(true) {
-      // wait for ISR message
-      if(xQueueReceive(inputQueue, &receivedState, portMAX_DELAY) == pdPASS) {
+    // the player listens until the round's time limit plus the late-grace time, then gives up
+    uint32_t listen_ms = round_timeout_ms + LATE_GRACE_MS;
+    uint32_t reaction = NO_REACTION;        // stays like this if the correct input never comes
+
+    // wait for input
+    uint32_t elapsed = 0;
+    while (elapsed < listen_ms) {
+      // wait for ISR message, but not longer than the time that is left
+      if (xQueueReceive(inputQueue, &receivedState, pdMS_TO_TICKS(listen_ms - elapsed)) == pdPASS) {
         if (xSemaphoreTake(gameStateMutex, portMAX_DELAY) == pdTRUE) {
           // correct input
-          if (receivedState == gameState) { 
-            uint32_t end_time = HAL_GetTick() - start_time;
-            xQueueOverwrite(resultQueue, &end_time);
+          if (receivedState == gameState) {
+            reaction = HAL_GetTick() - start_time;
             xSemaphoreGive(gameStateMutex); // release mutex
             break; // exit while loop and go back to initial waiting state again
           }
-          // release mutex, go back to waiting for input
+          // wrong input is ignored: release mutex, go back to waiting for input
           xSemaphoreGive(gameStateMutex);
         }
       }
+      elapsed = HAL_GetTick() - start_time;
     }
+
+    // report the reaction time (NO_REACTION if the player did not react)
+    xQueueOverwrite(resultQueue, &reaction);
   }
 }
 
 void score_manager(void *args) {
+  (void)args;
   for (;;) {
     // wait until notification is received
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    // read score mutex 
+
+    // read score mutex
+    xSemaphoreTake(scoreMutex, portMAX_DELAY);
+    size_t score1 = player1_score;
+    size_t score2 = player2_score;
+    xSemaphoreGive(scoreMutex);
+
     // update 7 seg displays
+    display_show(score1, score2);
   }
 }
 
@@ -417,7 +616,15 @@ void game_init(void)
   }
   HAL_NVIC_DisableIRQ(DMA2_Stream0_IRQn);
 
+  // buzzer: PWM running with the compare value 0 (silent); buzzer_tone() sets the pitch
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+  buzzer_tone(0);
+
+  // displays: 0 - 0
+  display_show(0, 0);
+
   gameStateMutex = xSemaphoreCreateMutex();
+  scoreMutex = xSemaphoreCreateMutex();
 
   // ISR -> players: one State per button press, a few can wait
   player1_input = xQueueCreate(8, sizeof(State));
@@ -428,7 +635,7 @@ void game_init(void)
   // IO manager -> round manager
   io_manager_result = xQueueCreate(1, sizeof(Time_Result));
 
-  if (gameStateMutex == NULL || player1_input == NULL || player2_input == NULL ||
+  if (gameStateMutex == NULL || scoreMutex == NULL || player1_input == NULL || player2_input == NULL ||
       player1_result == NULL || player2_result == NULL || io_manager_result == NULL) {
     Error_Handler();
   }
@@ -442,7 +649,7 @@ void game_init(void)
       xTaskCreate(player, "player1", STACK_WORDS, &player1_args, PRIO_PLAYER, &player1_handle) != pdPASS ||
       xTaskCreate(player, "player2", STACK_WORDS, &player2_args, PRIO_PLAYER, &player2_handle) != pdPASS ||
       xTaskCreate(score_manager, "score_manager", STACK_WORDS, NULL, PRIO_SCORE, &score_manager_handle) != pdPASS ||
-      xTaskCreate(round_manager, "round_manager", STACK_WORDS, NULL, PRIO_ROUND, &round_manager_handle) != pdPASS ||
+      xTaskCreate(round_manager, "round_manager", STACK_ROUND_WORDS, NULL, PRIO_ROUND, &round_manager_handle) != pdPASS ||
       xTaskCreate(pot_monitor, "pot_monitor", 128, NULL, PRIO_POT, &pot_monitor_handle) != pdPASS) {
     Error_Handler();
   }
@@ -616,6 +823,18 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     } else if (GPIO_Pin == pin_pull2) {
         queue = player2_input;
         state = PULL;
+    } else if (GPIO_Pin == B1_Pin) {
+        // blue button: start / restart the game. It wakes the round manager.
+        static uint32_t last_b1_ms;
+        uint32_t now_b1 = HAL_GetTick();
+        if ((now_b1 - last_b1_ms) >= DEBOUNCE_MS) {
+            last_b1_ms = now_b1;
+            if (round_manager_handle != NULL) {
+                vTaskNotifyGiveFromISR(round_manager_handle, &higher_priority_task_woken);
+            }
+        }
+        portYIELD_FROM_ISR(higher_priority_task_woken);
+        return;
     } else {
         return;  // Irrelevant
     }
