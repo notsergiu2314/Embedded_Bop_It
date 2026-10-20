@@ -58,6 +58,11 @@ typedef enum {
   BOP, TWIST, PULL
 } State;
 
+typedef struct {
+  uint32_t player1_time;
+  uint32_t player2_time;
+} Time_Result;
+
 // semaphores and mutexes
 
 static SemaphoreHandle_t gameStateMutex;
@@ -85,6 +90,8 @@ QueueHandle_t player2_input;
 // from players to Io Manager
 QueueHandle_t player1_result;
 QueueHandle_t player2_result;
+
+QueueHandle_t io_manager_result;
 
 
 // Enum aliases for various pins.
@@ -156,11 +163,32 @@ void round_manager(void *args) {
     xTaskNotifyGive(io_manager_handle)
 
     ulTaskNotifyTake(pdTRUE, portMAX_Delay)
-    // wait for I/O manager
+    // wait for I/O manager with timing results
+    Time_Result timeResult;
+    xQueueReceive(io_manager_result, &timeResult, portMAX_DELAY)
 
+    // determine winner
+    p1_time = timeResult.player1_time;
+    p2_time = timeResult.player2_time;
+    
+    //TODO: store timings somewhere
+
+    if (p1_time < p2_time) {
+      player1_score++;
+    } else {
+      player2_score++;
+    }
+
+    //TODO: display scores
     // update scores/score manager
 
     // if winner threshold reached
+
+    if (player1_score >= SCORE_THRESHOLD) {
+      //TODO: winstate
+    } else if (player2_score >= SCORE_THRESHOLD) {
+      // TODO: winstate
+    }
     // enter winstate
   }
 }
@@ -206,14 +234,9 @@ void io_manager(void *args)
     all_leds_off();
 
 
-    // TODO: maybe communicate both times to round manager instead?
-    // determine winner
+    // determine winner. 1 if p1 wins, 2 if p2 wins.
     // a draw is assumed to be impossible
-    if (player1_value < player2_value) {
-      player1_score++;
-    } else {
-      player2_score++;
-    }
+    // uint32_t winner = 1 + (player2_value  < player1_value);
 
     buzz_once()
     
@@ -407,6 +430,42 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE BEGIN Callback 1 */
 
   /* USER CODE END Callback 1 */
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    QueueHandle_t queue = NULL;
+    State state;
+    // Player 1
+    if (GPIO_Pin == pin_bop1) {
+        queue = player1_input;
+        state = BOP;
+    } else if (GPIO_Pin == pin_twist1) {
+        queue = player1_input;
+        state = TWIST;
+    } else if (GPIO_Pin == pin_pull1) {
+        queue = player1_input;
+        state = PULL;
+    // Player 2
+    } else if (GPIO_Pin == pin_bop2) {
+        queue = player2_input;
+        state = BOP;
+    } else if (GPIO_Pin == pin_twist2) {
+        queue = player2_input;
+        state = TWIST;
+    } else if (GPIO_Pin == pin_pull2) {
+        queue = player2_input;
+        state = PULL;
+    } else {
+        return;  // Irrelevant
+    }
+
+    if (queue != NULL) {
+      xQueueSendFromISR(queue, &state, &higher_priority_task_woken);
+    }
+
+    portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
 /**
