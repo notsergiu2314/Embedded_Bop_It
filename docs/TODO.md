@@ -29,7 +29,7 @@ Names: **BOP** = push button = `INPUT_BUTTON`, **PULL** = slide switch = `INPUT_
 |---|---|---|
 | task handles `round_manager_handle`, `io_manager_handle`, `player1/2_handle`, `score_manager_handle` | partly | `ioThread` and `playerThread[]` in [game.c:76-77](../App/Src/game.c#L76), `scoreThread` in [score.c:16](../App/Src/score.c#L16). The round manager needs no handle, nobody signals it directly (it receives through a queue). |
 | `enum state { BOP, TWIST, PULL }` | done | `InputType_t` ([board.h:14](../App/Inc/board.h#L14)). Names for printing: `targetName[]` ([game.c:79](../App/Src/game.c#L79)). |
-| `led_twist`, `led_bop`, `led_pull` (one LED each) | partly | The skeleton has 3 LEDs, the hardware has **6** (3 per player, lit for both players). Table `led_pin[player][input]` ([board.c:28](../App/Src/board.c#L28)), setter `Board_LedSet()` ([board.c:109](../App/Src/board.c#L109)). |
+| `led_twist`, `led_bop`, `led_pull` (one LED each) | done | Matches the hardware now: 3 cue LEDs, each one linked to the other player's matching LED (driven by the `_P1` pin; the `_P2` pins are spare and `App/` sets both together). Table `led_pin[player][input]` ([board.c:28](../App/Src/board.c#L28)), setter `Board_LedSet()` ([board.c:109](../App/Src/board.c#L109)). |
 | `pin_twist1/2`, `pin_bop1/2`, `pin_pull1/2` | done | `exti_input[]` ([board.c:45](../App/Src/board.c#L45)) for button and switch, `Board_PotRead()` ([board.c:124](../App/Src/board.c#L124)) for the pot. |
 | `pin_score` (7 seg) | partly | There is no score pin: the two 595s are driven over SPI + a latch pin. `Board_DisplayScores()` ([board.c:141](../App/Src/board.c#L141)). |
 | `pin_buzzer` | partly | The buzzer is **not** a GPIO: it is TIM4 PWM on PB6. `Board_BuzzerTone()` ([board.c:157](../App/Src/board.c#L157)). |
@@ -111,11 +111,11 @@ Names: **BOP** = push button = `INPUT_BUTTON`, **PULL** = slide switch = `INPUT_
 - [ ] Wiring: buttons and switches go to **GND** with the internal pull-up (CubeMX already set it). Pots to 3V3, never 5 V.
 
 ### Outputs
-- [ ] **7-segment:** common anode or common cathode (`SEG_COMMON_ANODE` in `board.c`), and segment order. Byte order of the two chained 595s is player 2 first ([board.c:141-150](../App/Src/board.c#L141)).
+- [ ] **7-segment:** common anode or common cathode (`SEG_COMMON_ANODE` in `board.c`), and segment order. Byte order of the two chained 595s is player 1 first, because the chip chained to the first one (player 1, left) is the last in the chain ([board.c:141-150](../App/Src/board.c#L141)).
 - [ ] Score range is **0-9** per display, so `WIN_SCORE` must be <= 9.
 - [ ] **Buzzer** is a passive piezo: it needs a frequency (PWM), a plain GPIO high makes no sound. The timer prescaler must be 83 (1 MHz) or the pitch is wrong.
 - [ ] **One owner per output:** only the score task touches the displays, only the round manager the buzzer, only one task the UART. Otherwise two tasks write at once.
-- [ ] LED resistors for all 6 cue LEDs and 14 display segments.
+- [ ] LED resistors for the 3 cue LEDs (or 6 if the pairs are not wired together) and 14 display segments.
 
 ### Game rules to decide
 - [ ] What counts as a **wrong input**: ignored (current) or penalty?

@@ -1,7 +1,8 @@
 # Pinout - 2-player reaction game (NUCLEO-F401RE)
 
-Each player has: 1 push button, 1 slide switch, 1 potentiometer, and one cue LED per input,
-plus a 7-segment score display (0-9). Shared: 1 passive buzzer.
+Each player has: 1 push button, 1 slide switch, 1 potentiometer and a 7-segment score display (0-9).
+Shared: 1 passive buzzer and the **3 cue LEDs** (button, switch, pot): each LED of one player is
+linked to the matching LED of the other player, so both players must do the **same action** in a round.
 All 6 inputs go straight to the MCU (no input shift register), so the interrupt can timestamp
 a press with 1 microsecond accuracy.
 
@@ -53,19 +54,25 @@ Pins are written `Arduino name  MCU pin`. `->` = MCU output, `<-` = MCU input, `
 
 | MCU pin | Header | Label | What it does |
 |---|---|---|---|
-| PC7 | D9 | `LED_BTN_P1` | Lights when player 1 must press the button. |
-| PB8 | D15 | `LED_SW_P1` | Lights when player 1 must flip the switch. |
-| PB9 | D14 | `LED_POT_P1` | Lights when player 1 must turn the potentiometer. |
-| PA4 | A2 | `LED_BTN_P2` | Lights when player 2 must press the button. |
-| PB0 | A3 | `LED_SW_P2` | Lights when player 2 must flip the switch. |
-| PC1 | A4 | `LED_POT_P2` | Lights when player 2 must turn the potentiometer. |
+| PC7 | D9 | `LED_BTN_P1` | Lights when **both** players must press the button. |
+| PB8 | D15 | `LED_SW_P1` | Lights when **both** players must flip the switch. |
+| PB9 | D14 | `LED_POT_P1` | Lights when **both** players must turn the potentiometer. |
+| PA4 | A2 | `LED_BTN_P2` | Spare: only needed if the two button LEDs are not wired together. |
+| PB0 | A3 | `LED_SW_P2` | Spare: only needed if the two switch LEDs are not wired together. |
+| PC1 | A4 | `LED_POT_P2` | Spare: only needed if the two pot LEDs are not wired together. |
+
+**Each cue LED is shared by the two players:** the LED of one player is linked to the matching LED of
+the other player, so there are three cue lights (button, switch, pot) and in every round **both
+players must do the same action**. The first three pins are the ones that drive them. The code
+still sets the `_P2` pins together with the `_P1` pins (`game.c` loops over both players), so it
+works whether or not anything is connected to the spare pins.
 
 ### Displays and buzzer
 
 | MCU pin | Header | CubeMX mode / label | What it does |
 |---|---|---|---|
 | PB3 | D3 | SPI1_SCK | Shift clock to both 74HC595 chips. |
-| PB5 | D4 | SPI1_MOSI | Serial data to the first 74HC595 (SPI mode: Transmit Only Master). |
+| PB5 | D4 | SPI1_MOSI | Serial data to the first 74HC595 (player 2's display; it passes data on to player 1's). SPI mode: Transmit Only Master. |
 | PB10 | D6 | GPIO output, `LATCH_595` | Rising edge copies the shifted bits to the display outputs. |
 | PB6 | D10 | TIM4_CH1 (PWM) | Square wave for the passive buzzer; the frequency is the pitch. |
 
@@ -92,14 +99,16 @@ Pins are written `Arduino name  MCU pin`. `->` = MCU output, `<-` = MCU input, `
 * **Button:** one leg to the MCU pin, the other to GND (the internal pull-up does the rest).
 * **Slide switch:** middle pin (common) to the MCU pin, one outer pin to GND.
 * **Potentiometer:** outer pins to 3V3 and GND, middle pin (wiper) to the ADC pin. **Never 5 V.**
-* **Cue LED:** MCU pin -> resistor -> LED anode, LED cathode -> GND.
+* **Cue LED:** MCU pin -> resistor -> LED anode, LED cathode -> GND. The two LEDs of the same action (one per player) are linked and driven by the same pin.
 * **7-segment display (assumed common cathode):** segments a-g through a resistor each to the 595 outputs, common pin to GND. For common anode, wire the common to 3V3 and set `SEG_COMMON_ANODE 1` in `board.c`.
 * **Buzzer:** `+` to PB6, `-` to GND.
-* **Resistors:** 14 for the segments (7 per display) + 6 for the LEDs = 20 in total.
+* **Resistors:** one per display segment (7 per display) and one per cue LED.
 
-Two 74HC595 chained (DIP-16 pin numbers):
+Two 74HC595 chained (DIP-16 pin numbers). **Chip 1** is the one whose data pin is wired to the MCU
+(**right** on the breadboard) and drives the **player 2** display. **Chip 2** is chained to it
+(**left** on the breadboard) and drives the **player 1** display.
 
-| 595 pin | Chip 1 (player 1) | Chip 2 (player 2) |
+| 595 pin | Chip 1 (player 2, right) | Chip 2 (player 1, left) |
 |---|---|---|
 | 16 VCC | 3V3 | 3V3 |
 | 8 GND | GND | GND |

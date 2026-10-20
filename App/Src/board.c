@@ -141,8 +141,9 @@ static uint8_t prvSegments(uint8_t digit)
 void Board_DisplayScores(uint8_t scoreP1, uint8_t scoreP2)
 {
     /* The first byte shifted out ends up in the LAST chip of the chain.
-     * Chip 1 (MOSI side) = player 1, chip 2 (Q7' side) = player 2. */
-    uint8_t frame[2] = { prvSegments(scoreP2), prvSegments(scoreP1) };
+     * Chip 1 (MOSI side, right on the breadboard) = player 2,
+     * chip 2 (chained to Q7', left on the breadboard) = player 1. */
+    uint8_t frame[2] = { prvSegments(scoreP1), prvSegments(scoreP2) };
 
     osMutexAcquire(spi_mutex, osWaitForever);
     HAL_SPI_Transmit(&hspi1, frame, 2U, 10U);
