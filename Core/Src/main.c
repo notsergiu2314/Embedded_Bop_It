@@ -98,7 +98,7 @@ void buzz_once()
   //TODO: buzzer implementation
 }
 
-void round_manager() {
+void round_manager(void *args) {
   // initialize all relevant registers, pins, and variables
   for (;;) {
 
@@ -109,8 +109,10 @@ void round_manager() {
   
     // reset inputs and outputs (except scores)
     // buzz once
+    buzz_once();
 
     // start I/O manager
+    xTaskNotifyGive(io_manager_handle)
 
     // wait for I/O manager
 
@@ -122,11 +124,17 @@ void round_manager() {
 }
 
 
-void io_manager() 
+void io_manager(void *args) 
 {
   // Wait for round manager notification
   for (;;) {
+    // Wait until start notification
+    ulTaskNotifyTake(pdTRUE, portMAX_Delay)
+    
     // start player tasks 1 and 2
+    ulTaskNotifyGive(player1_handle)
+    ulTaskNotifyGive(player2_handle)
+
     // wait.
     
 
@@ -137,24 +145,18 @@ void io_manager()
   }
 }
 
-void playerLogic(/*TODO: Task handles*/)
+void player(void *args)
 {
   for (;;) {
+    // start
 
+    // wait for input
+
+    // send back to Iomanager
   }
 }
 
-void player1() 
-{
-  playerLogic();
-}
-
-void player2() 
-{
-  playerLogic();
-}
-
-void score_manager() {
+void score_manager(void *args) {
   for (;;) {
     // wait until notification is received
     // read score mutex 
