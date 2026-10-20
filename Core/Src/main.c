@@ -89,7 +89,7 @@ uint16_t pin_buzzer;
 
 enum state {
   BOP, TWIST, PULL
-}
+};
 
 /* USER CODE END PV */
 
@@ -131,7 +131,7 @@ void io_manager()
     
 
     // determine winner
-    HAL_GPIO_WRITEPIN(GPIOA)
+    HAL_GPIO_WRITEPIN(GPIOA);
     // winner indication (buzz, flash LEDs?)
     // notify round manager
   }
