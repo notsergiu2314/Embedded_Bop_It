@@ -52,6 +52,17 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+
+// Enums and Structs
+typedef enum {
+  BOP, TWIST, PULL
+} State;
+
+// semaphores and mutexes
+
+static SemaphoreHandle_t gameStateMutex;
+static State gameState;
+
 // Handles for timers
 
 // Handles for tasks
@@ -60,6 +71,16 @@ TaskHandle_t io_manager_handle = NULL;
 TaskHandle_t player1_handle = NULL;
 TaskHandle_t player2_handle = NULL;
 TaskHandle_t score_manager_handle = NULL;
+
+// Handles for queues
+
+// from ISR to players
+QueueHandle_t player1_input;
+QueueHandle_t player2_input;
+
+// from players to Io Manager
+QueueHandle_t player1_result;
+QueueHandle_t player2_result;
 
 
 // Enum aliases for various pins.
@@ -87,15 +108,33 @@ uint16_t pin_score;
 // Buzzer
 uint16_t pin_buzzer;
 
-enum state {
-  BOP, TWIST, PULL
+/* USER CODE END PV */
+
+uint32_t random(uint32_t seed)
+{
+    uint32_t x = seed;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    seed = x;
+    return x;
 }
 
-/* USER CODE END PV */
+State get_random_gameState() {
+  size_t state_count = 3;
+  return (State) (random(HAL_GetTick() % state_count;))
+}
 
 void buzz_once()
 {
   //TODO: buzzer implementation
+}
+
+void all_leds_off()
+{
+  HAL_GPIO_WritePin(GPIOA, led_twist, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, led_bop, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, led_pull, GPIO_PIN_RESET);
 }
 
 void round_manager(void *args) {
@@ -103,10 +142,8 @@ void round_manager(void *args) {
   for (;;) {
 
     // Turn off all LEDs
-    HAL_GPIO_WritePin(GPIOA, led_twist, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOA, led_bop, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOA, led_pull, GPIO_PIN_RESET);
-  
+    all_leds_off();
+
     // reset inputs and outputs (except scores)
     // buzz once
     buzz_once();
@@ -126,20 +163,48 @@ void round_manager(void *args) {
 
 void io_manager(void *args) 
 {
+  player1_value;
+  player2_value;
   // Wait for round manager notification
   for (;;) {
     // Wait until start notification
     ulTaskNotifyTake(pdTRUE, portMAX_Delay)
     
+    // pick a random game state.
+    if (xSemaphoreTake(gameStateMutex, portMAX_DELAY) == pdTRUE) {
+      gameState = get_random_gameState();
+      xSemaphoreGive(gameStateMutex);
+    }
+
+    // Turn on the correct LEDs
+
+    switch (gameState) {
+      case BOP:
+        HAL_GPIO_WritePin(GPIOA, led_bop, GPIO_PIN_SET);
+      break;
+      case TWIST:
+        HAL_GPIO_WritePin(GPIOA, led_twist, GPIO_PIN_SET);
+      break;
+      case PULL:
+        HAL_GPIO_WritePin(GPIOA, led_pull, GPIO_PIN_SET);
+      break;
+    }
+
     // start player tasks 1 and 2
     ulTaskNotifyGive(player1_handle)
     ulTaskNotifyGive(player2_handle)
 
-    // wait.
+    // wait for both players
+    xQueueReceive(player1_result, &player1_value, portMAX_DELAY)
+    xQueueReceive(player2_result, &player2_value, portMAX_DELAY)
+    
+    all_leds_off();
+
+
     
 
     // determine winner
-    HAL_GPIO_WRITEPIN(GPIOA)
+    
     // winner indication (buzz, flash LEDs?)
     // notify round manager
   }
@@ -147,12 +212,32 @@ void io_manager(void *args)
 
 void player(void *args)
 {
+
+  inputQueue = args.inputQueue;
+  resultQuuee = args.resultQueue;
+  State receivedState;
+
   for (;;) {
-    // start
+    // wait until IO manager notifies start
+    ulTaskNotifyTake(pdTRUE, portMAX_Delay)
 
     // wait for input
 
-    // send back to Iomanager
+    while(true) {
+      // wait for ISR message
+      if(xQueueReceive(inputQueue, &receivedState, portMAX_DELAY) == pdPASS) {
+        if (xSemaphoreTake(gameStateMutex, portMAX_DELAY) == pdTRUE) {
+          // correct input
+          if (receivedState == gameState) { 
+            xQueueOverwrite(resultQueue, result)
+            xSemaphoreGive(gameStateMutex); // release mutex
+            break; // exit while loop and go back to initial waiting state again
+          }
+          // release mutex, go back to waiting for input
+          xSemaphoreGive(gameStateMutex)
+        }
+      }
+    }
   }
 }
 
@@ -183,7 +268,7 @@ void MX_FREERTOS_Init(void);
   */
 int main(void)
 {
-
+State
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -216,7 +301,7 @@ int main(void)
 
   /* USER CODE END 2 */
 
-  /* Init scheduler */
+  /* Init schedStateuler */
   osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
   MX_FREERTOS_Init();
 
