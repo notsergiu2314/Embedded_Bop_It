@@ -69,6 +69,17 @@ typedef struct {
   QueueHandle_t resultQueue;  // player -> IO manager
 } Player_Args;
 
+// Game settings
+#define TWIST_ENABLED   0      // 1 once the pot (TWIST) input is implemented. With 0 only BOP and PULL are asked.
+#define ROUND_PAUSE_MS  1000   // pause before every round so the players can get ready
+
+// Task settings: priorities are CMSIS values (24 = normal, 32 = above normal), stacks are in 4-byte words
+#define PRIO_PLAYER     osPriorityAboveNormal
+#define PRIO_IO         osPriorityAboveNormal
+#define PRIO_ROUND      osPriorityNormal
+#define PRIO_SCORE      osPriorityBelowNormal
+#define STACK_WORDS     256
+
 // semaphores and mutexes
 
 static SemaphoreHandle_t gameStateMutex;
@@ -102,20 +113,29 @@ QueueHandle_t io_manager_result;
 
 // Enum aliases for various pins.
 
-// Indicator lights
-uint16_t led_twist;
-uint16_t led_bop;
-uint16_t led_pull;
+// A pin is a port and a pin number. The macros come from main.h (CubeMX user labels).
+typedef struct {
+  GPIO_TypeDef *port;
+  uint16_t pin;
+} Pin;
 
-// Inputs Player 1 
-uint16_t pin_twist1;
-uint16_t pin_bop1;
-uint16_t pin_pull1;
+// Indicator lights. Each light is shared by both players (their LEDs are wired together),
+// so only the player 1 pins are used.
+static const Pin led_twist = { LED_POT_P1_GPIO_Port, LED_POT_P1_Pin };   // D14
+static const Pin led_bop   = { LED_BTN_P1_GPIO_Port, LED_BTN_P1_Pin };   // D9
+static const Pin led_pull  = { LED_SW_P1_GPIO_Port,  LED_SW_P1_Pin };    // D15
+
+// Inputs. The callback only needs the pin number.
+// TWIST is the pot: it is read through the ADC (PA0 / PA1), it has no interrupt pin (0 = none).
+// Inputs Player 1
+static const uint16_t pin_twist1 = 0;
+static const uint16_t pin_bop1   = BTN_P1_Pin;   // PA10 (D2)
+static const uint16_t pin_pull1  = SW_P1_Pin;    // PB4  (D5)
 
 // Inputs player 2
-uint16_t pin_twist2;
-uint16_t pin_bop2;
-uint16_t pin_pull2;
+static const uint16_t pin_twist2 = 0;
+static const uint16_t pin_bop2   = BTN_P2_Pin;   // PA8  (D7)
+static const uint16_t pin_pull2  = SW_P2_Pin;    // PA9  (D8)
 
 // 7 seg displays for score
 uint16_t pin_score;
@@ -127,19 +147,33 @@ uint16_t pin_buzzer;
 
 /* USER CODE END PV */
 
-uint32_t random(uint32_t seed)
+// xorshift32 pseudo random generator. It keeps its state between calls.
+static uint32_t random_state = 0;
+
+uint32_t random_next(void)
 {
-    uint32_t x = seed;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    seed = x;
-    return x;
+  if (random_state == 0) {
+    // seed once: tick count plus the position inside the current tick (never 0)
+    random_state = (HAL_GetTick() ^ (SysTick->VAL << 8)) | 1u;
+  }
+  uint32_t x = random_state;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  random_state = x;
+  return x;
 }
 
 State get_random_gameState() {
-  size_t state_count = 3;
-  return (State) (random(HAL_GetTick() % state_count));
+  // the states that can be asked (TWIST only once the pot is implemented)
+  static const State playable[] = {
+    BOP,
+#if TWIST_ENABLED
+    TWIST,
+#endif
+    PULL
+  };
+  return playable[random_next() % (sizeof(playable) / sizeof(playable[0]))];
 }
 
 void buzz_once()
@@ -147,11 +181,16 @@ void buzz_once()
   //TODO: buzzer implementation
 }
 
+void led_write(const Pin *led, GPIO_PinState state)
+{
+  HAL_GPIO_WritePin(led->port, led->pin, state);
+}
+
 void all_leds_off()
 {
-  HAL_GPIO_WritePin(GPIOA, led_twist, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOA, led_bop, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOA, led_pull, GPIO_PIN_RESET);
+  led_write(&led_twist, GPIO_PIN_RESET);
+  led_write(&led_bop, GPIO_PIN_RESET);
+  led_write(&led_pull, GPIO_PIN_RESET);
 }
 
 void round_manager(void *args) {
@@ -161,6 +200,9 @@ void round_manager(void *args) {
     // Turn off all LEDs
     all_leds_off();
 
+    // short pause so the players can get ready
+    vTaskDelay(pdMS_TO_TICKS(ROUND_PAUSE_MS));
+
     // reset inputs and outputs (except scores)
     // buzz once
     buzz_once();
@@ -168,8 +210,7 @@ void round_manager(void *args) {
     // start I/O manager
     xTaskNotifyGive(io_manager_handle);
 
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    // wait for I/O manager with timing results
+    // wait for I/O manager with timing results (the result queue is the only signal)
     Time_Result timeResult;
     xQueueReceive(io_manager_result, &timeResult, portMAX_DELAY);
 
@@ -219,13 +260,13 @@ void io_manager(void *args)
 
     switch (gameState) {
       case BOP:
-        HAL_GPIO_WritePin(GPIOA, led_bop, GPIO_PIN_SET);
+        led_write(&led_bop, GPIO_PIN_SET);
       break;
       case TWIST:
-        HAL_GPIO_WritePin(GPIOA, led_twist, GPIO_PIN_SET);
+        led_write(&led_twist, GPIO_PIN_SET);
       break;
       case PULL:
-        HAL_GPIO_WritePin(GPIOA, led_pull, GPIO_PIN_SET);
+        led_write(&led_pull, GPIO_PIN_SET);
       break;
     }
 
@@ -249,7 +290,9 @@ void io_manager(void *args)
     
     
     // winner indication (buzz, flash LEDs?)
-    // notify round manager
+    // notify round manager with both reaction times
+    Time_Result result = { player1_value, player2_value };
+    xQueueSend(io_manager_result, &result, portMAX_DELAY);
   }
 }
 
@@ -289,11 +332,48 @@ void player(void *args)
 void score_manager(void *args) {
   for (;;) {
     // wait until notification is received
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     // read score mutex 
     // update 7 seg displays
   }
 }
 
+
+// Creates the mutex, the queues and the tasks. Called once from main(), before the scheduler starts.
+static Player_Args player1_args;
+static Player_Args player2_args;
+
+void game_init(void)
+{
+  gameStateMutex = xSemaphoreCreateMutex();
+
+  // ISR -> players: one State per button press, a few can wait
+  player1_input = xQueueCreate(8, sizeof(State));
+  player2_input = xQueueCreate(8, sizeof(State));
+  // players -> IO manager: only the latest reaction time (xQueueOverwrite needs length 1)
+  player1_result = xQueueCreate(1, sizeof(uint32_t));
+  player2_result = xQueueCreate(1, sizeof(uint32_t));
+  // IO manager -> round manager
+  io_manager_result = xQueueCreate(1, sizeof(Time_Result));
+
+  if (gameStateMutex == NULL || player1_input == NULL || player2_input == NULL ||
+      player1_result == NULL || player2_result == NULL || io_manager_result == NULL) {
+    Error_Handler();
+  }
+
+  player1_args.inputQueue = player1_input;
+  player1_args.resultQueue = player1_result;
+  player2_args.inputQueue = player2_input;
+  player2_args.resultQueue = player2_result;
+
+  if (xTaskCreate(io_manager, "io_manager", STACK_WORDS, NULL, PRIO_IO, &io_manager_handle) != pdPASS ||
+      xTaskCreate(player, "player1", STACK_WORDS, &player1_args, PRIO_PLAYER, &player1_handle) != pdPASS ||
+      xTaskCreate(player, "player2", STACK_WORDS, &player2_args, PRIO_PLAYER, &player2_handle) != pdPASS ||
+      xTaskCreate(score_manager, "score_manager", STACK_WORDS, NULL, PRIO_SCORE, &score_manager_handle) != pdPASS ||
+      xTaskCreate(round_manager, "round_manager", STACK_WORDS, NULL, PRIO_ROUND, &round_manager_handle) != pdPASS) {
+    Error_Handler();
+  }
+}
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
@@ -343,7 +423,7 @@ int main(void)
   MX_TIM2_Init();
   MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
-
+  game_init();
   /* USER CODE END 2 */
 
   /* Init scheduler */

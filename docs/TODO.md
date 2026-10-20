@@ -17,17 +17,28 @@ code outside the `USER CODE` blocks is tolerated.
 Choices made for now: a round ends when **both** players have reacted; if nobody reacts nothing happens;
 `SCORE_THRESHOLD` is **9** (one display digit, change it in `main.c`); a tie goes to player 2 (see below).
 
-### It builds, but it does not play yet
+### Done on `sergiu-test` (not tested on the board yet)
+
+| # | What | How |
+|---|---|---|
+| 1 | Tasks, queues and mutex are created | `game_init()` in `main.c`, called from `USER CODE BEGIN 2` (before the scheduler starts). Player tasks get a `Player_Args *`. Task priorities and stack size are the `PRIO_*` / `STACK_WORDS` defines. |
+| 2 | Real pins | LEDs: `led_bop` D9 (PC7), `led_pull` D15 (PB8), `led_twist` D14 (PB9), through `led_write()`. Inputs: `pin_bop1/2` = PA10 / PA8, `pin_pull1/2` = PB4 / PA9. `pin_twist1/2` are 0 (the pot has no interrupt pin). |
+| 3 | Random | `random_next()` keeps its state (xorshift32, seeded once from the tick + SysTick). `get_random_gameState()` picks from the `playable` list. The seed is only the start-up time, so the sequence can repeat after a reset. |
+| 4 | One signal between the managers | The round manager's extra `ulTaskNotifyTake` is gone. The I/O manager sends a `Time_Result` through `io_manager_result`. |
+
+Extras needed to make it usable (change or remove them freely):
+- `TWIST_ENABLED` is **0**: until the pot is implemented a TWIST round could never end, so only BOP and PULL are asked. Set it to 1 once TWIST works.
+- `ROUND_PAUSE_MS` (1000): pause before each round, otherwise the next LED lights the instant the previous round ends.
+- `score_manager` now blocks on `ulTaskNotifyTake` (its first TODO line); an empty loop would have used all the CPU.
+
+### Still missing
 
 | # | What is missing | Where | Note |
 |---|---|---|---|
-| 1 | **Nothing is created.** No task, queue or mutex exists, so nothing runs. `gameStateMutex` and all queue handles are uninitialised. | `main.c` | create them in `MX_FREERTOS_Init()` (`USER CODE BEGIN RTOS_THREADS`) with `xTaskCreate`, `xQueueCreate`, `xSemaphoreCreateMutex`. The player tasks get a `Player_Args *` (`inputQueue`, `resultQueue`). Reference: [game.c:383](../App/Src/game.c#L383) |
-| 2 | **Pin variables are all 0** and the LED code hard-codes `GPIOA`. The pins are on ports A, B and C. | `led_*`, `pin_*`, `all_leds_off()`, `io_manager()` | use the `*_Pin` / `*_GPIO_Port` macros from `main.h`. Cue LEDs: button = D9 (PC7), switch = D15 (PB8), pot = D14 (PB9). Inputs and the rest: [PINOUT.md](PINOUT.md) |
-| 3 | **`get_random_gameState()` returns a huge number**, not 0-2 (`random()` is cast straight to `State`), and the seed `HAL_GetTick() % 3` only has 3 values (seed 0 gives 0 forever). | `main.c` | return `random(...) % 3` and seed from a larger value. `random` is also a libc name; rename if it ever clashes. |
-| 4 | **Round manager waits twice, for things nobody sends.** It does `ulTaskNotifyTake` on its own notification (nobody gives it) and waits on `io_manager_result` (the I/O manager never sends to it). | `round_manager()`, `io_manager()` | pick one: queue (send a `Time_Result` at the end of `io_manager`) and drop the `ulTaskNotifyTake` in `round_manager` |
-| 5 | **TWIST (pot) is not an interrupt.** The callback maps `pin_twist1/2` as if it were. | `HAL_GPIO_EXTI_Callback()` | poll the ADC in the player task. Reference: [game.c:131, 150](../App/Src/game.c#L131) |
+| 5 | **TWIST (pot) is not an interrupt.** The callback maps `pin_twist1/2` (0 now). | `HAL_GPIO_EXTI_Callback()` | read the ADC and send a `TWIST` message into the player queue when the pot moved. Reference: [game.c:131, 150](../App/Src/game.c#L131) |
 | 6 | **Stale input and no debounce.** Messages from before the round stay in `playerN_input`, so an early press counts, and one press can queue several events. | player task, callback | `xQueueReset(playerN_input)` right before notifying the players; debounce in the callback. Reference: [game.c:207](../App/Src/game.c#L207), [board.c:171](../App/Src/board.c#L171) |
-| 7 | Score manager, displays, buzzer, winstate, winner indication, and storing the timings are still TODO. | `score_manager()`, `buzz_once()` | [score.c](../App/Src/score.c), `Board_DisplayScores` ([board.c:141](../App/Src/board.c#L141)), `Board_BuzzerTone` ([board.c:157](../App/Src/board.c#L157)) |
+| 7 | Score manager body, displays, buzzer, winstate, winner indication, and storing the timings are still TODO. | `score_manager()`, `buzz_once()` | [score.c](../App/Src/score.c), `Board_DisplayScores` ([board.c:141](../App/Src/board.c#L141)), `Board_BuzzerTone` ([board.c:157](../App/Src/board.c#L157)). The round manager also never wakes the score manager yet. |
+| 8 | Nothing is printed, so the only feedback is the cue LED. | | a UART line per round (reaction times, score) would help testing |
 
 ### Known behaviour we accepted for now
 - **Tie** (both players measure the same time in ms): `if (p1_time < p2_time)` is false, so **player 2 gets the point**. With 1 ms resolution this can happen in roughly 1 round out of 70 when two players react about equally fast (rough estimate, not measured).
