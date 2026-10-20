@@ -52,6 +52,26 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+
+// Enums and Structs
+typedef enum {
+  BOP, TWIST, PULL
+} State;
+
+typedef struct {
+  uint32_t player1_time;
+  uint32_t player2_time;
+} Time_Result;
+
+// semaphores and mutexes
+
+static SemaphoreHandle_t gameStateMutex;
+static State gameState;
+
+static const size_t SCORE_THRESHOLD = 3;
+static size_t player1_score = 0; 
+static size_t player2_score = 0;
+
 // Handles for timers
 
 // Handles for tasks
@@ -60,6 +80,18 @@ TaskHandle_t io_manager_handle = NULL;
 TaskHandle_t player1_handle = NULL;
 TaskHandle_t player2_handle = NULL;
 TaskHandle_t score_manager_handle = NULL;
+
+// Handles for queues
+
+// from ISR to players
+QueueHandle_t player1_input;
+QueueHandle_t player2_input;
+
+// from players to Io Manager
+QueueHandle_t player1_result;
+QueueHandle_t player2_result;
+
+QueueHandle_t io_manager_result;
 
 
 // Enum aliases for various pins.
@@ -87,74 +119,168 @@ uint16_t pin_score;
 // Buzzer
 uint16_t pin_buzzer;
 
-enum state {
-  BOP, TWIST, PULL
-};
-
 /* USER CODE END PV */
+
+uint32_t random(uint32_t seed)
+{
+    uint32_t x = seed;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    seed = x;
+    return x;
+}
+
+State get_random_gameState() {
+  size_t state_count = 3;
+  return (State) (random(HAL_GetTick() % state_count;))
+}
 
 void buzz_once()
 {
   //TODO: buzzer implementation
 }
 
-void round_manager() {
+void all_leds_off()
+{
+  HAL_GPIO_WritePin(GPIOA, led_twist, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, led_bop, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, led_pull, GPIO_PIN_RESET);
+}
+
+void round_manager(void *args) {
   // initialize all relevant registers, pins, and variables
   for (;;) {
 
     // Turn off all LEDs
-    HAL_GPIO_WritePin(GPIOA, led_twist, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOA, led_bop, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOA, led_pull, GPIO_PIN_RESET);
-  
+    all_leds_off();
+
     // reset inputs and outputs (except scores)
     // buzz once
+    buzz_once();
 
     // start I/O manager
+    xTaskNotifyGive(io_manager_handle)
 
-    // wait for I/O manager
+    ulTaskNotifyTake(pdTRUE, portMAX_Delay)
+    // wait for I/O manager with timing results
+    Time_Result timeResult;
+    xQueueReceive(io_manager_result, &timeResult, portMAX_DELAY)
 
+    // determine winner
+    p1_time = timeResult.player1_time;
+    p2_time = timeResult.player2_time;
+    
+    //TODO: store timings somewhere
+
+    if (p1_time < p2_time) {
+      player1_score++;
+    } else {
+      player2_score++;
+    }
+
+    //TODO: display scores
     // update scores/score manager
 
     // if winner threshold reached
+
+    if (player1_score >= SCORE_THRESHOLD) {
+      //TODO: winstate
+    } else if (player2_score >= SCORE_THRESHOLD) {
+      // TODO: winstate
+    }
     // enter winstate
   }
 }
 
 
-void io_manager() 
+void io_manager(void *args) 
 {
-  // Wait for round manager notification
+  player1_value;
+  player2_value;
+
   for (;;) {
+    // Wait until start notification
+    ulTaskNotifyTake(pdTRUE, portMAX_Delay)
+    
+    // pick a random game state.
+    if (xSemaphoreTake(gameStateMutex, portMAX_DELAY) == pdTRUE) {
+      gameState = get_random_gameState();
+      xSemaphoreGive(gameStateMutex);
+    }
+
+    // Turn on the correct LEDs
+
+    switch (gameState) {
+      case BOP:
+        HAL_GPIO_WritePin(GPIOA, led_bop, GPIO_PIN_SET);
+      break;
+      case TWIST:
+        HAL_GPIO_WritePin(GPIOA, led_twist, GPIO_PIN_SET);
+      break;
+      case PULL:
+        HAL_GPIO_WritePin(GPIOA, led_pull, GPIO_PIN_SET);
+      break;
+    }
+
     // start player tasks 1 and 2
-    // wait.
+    ulTaskNotifyGive(player1_handle)
+    ulTaskNotifyGive(player2_handle)
+`
+    // wait for both players
+    xQueueReceive(player1_result, &player1_value, portMAX_DELAY)
+    xQueueReceive(player2_result, &player2_value, portMAX_DELAY)
+    
+    all_leds_off();
+
+
+    // determine winner. 1 if p1 wins, 2 if p2 wins.
+    // a draw is assumed to be impossible
+    // uint32_t winner = 1 + (player2_value  < player1_value);
+
+    buzz_once()
     
 
-    // determine winner
-    HAL_GPIO_WRITEPIN(GPIOA);
+    
+    
     // winner indication (buzz, flash LEDs?)
     // notify round manager
   }
 }
 
-void playerLogic(/*TODO: Task handles*/)
+void player(void *args)
 {
-  for (;;) {
 
+  inputQueue = args.inputQueue;
+  resultQueue = args.resultQueue;
+  State receivedState;
+
+  for (;;) {
+    // wait until IO manager notifies start
+    ulTaskNotifyTake(pdTRUE, portMAX_Delay)
+    uint32_t start_time = HAL_GetTick();
+    // wait for input
+
+    while(true) {
+      // wait for ISR message
+      if(xQueueReceive(inputQueue, &receivedState, portMAX_DELAY) == pdPASS) {
+        if (xSemaphoreTake(gameStateMutex, portMAX_DELAY) == pdTRUE) {
+          // correct input
+          if (receivedState == gameState) { 
+            end_time = HAL_GetTick() - start_time;
+            xQueueOverwrite(resultQueue, end_time)
+            xSemaphoreGive(gameStateMutex); // release mutex
+            break; // exit while loop and go back to initial waiting state again
+          }
+          // release mutex, go back to waiting for input
+          xSemaphoreGive(gameStateMutex)
+        }
+      }
+    }
   }
 }
 
-void player1() 
-{
-  playerLogic();
-}
-
-void player2() 
-{
-  playerLogic();
-}
-
-void score_manager() {
+void score_manager(void *args) {
   for (;;) {
     // wait until notification is received
     // read score mutex 
@@ -181,7 +307,7 @@ void MX_FREERTOS_Init(void);
   */
 int main(void)
 {
-
+State
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -214,7 +340,7 @@ int main(void)
 
   /* USER CODE END 2 */
 
-  /* Init scheduler */
+  /* Init schedStateuler */
   osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
   MX_FREERTOS_Init();
 
@@ -304,6 +430,42 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE BEGIN Callback 1 */
 
   /* USER CODE END Callback 1 */
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    QueueHandle_t queue = NULL;
+    State state;
+    // Player 1
+    if (GPIO_Pin == pin_bop1) {
+        queue = player1_input;
+        state = BOP;
+    } else if (GPIO_Pin == pin_twist1) {
+        queue = player1_input;
+        state = TWIST;
+    } else if (GPIO_Pin == pin_pull1) {
+        queue = player1_input;
+        state = PULL;
+    // Player 2
+    } else if (GPIO_Pin == pin_bop2) {
+        queue = player2_input;
+        state = BOP;
+    } else if (GPIO_Pin == pin_twist2) {
+        queue = player2_input;
+        state = TWIST;
+    } else if (GPIO_Pin == pin_pull2) {
+        queue = player2_input;
+        state = PULL;
+    } else {
+        return;  // Irrelevant
+    }
+
+    if (queue != NULL) {
+      xQueueSendFromISR(queue, &state, &higher_priority_task_woken);
+    }
+
+    portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
 /**
