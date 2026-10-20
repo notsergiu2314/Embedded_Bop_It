@@ -63,6 +63,10 @@ typedef enum {
 static SemaphoreHandle_t gameStateMutex;
 static State gameState;
 
+static const size_t SCORE_THRESHOLD = 3;
+static size_t player1_score = 0; 
+static size_t player2_score = 0;
+
 // Handles for timers
 
 // Handles for tasks
@@ -151,6 +155,7 @@ void round_manager(void *args) {
     // start I/O manager
     xTaskNotifyGive(io_manager_handle)
 
+    ulTaskNotifyTake(pdTRUE, portMAX_Delay)
     // wait for I/O manager
 
     // update scores/score manager
@@ -165,7 +170,7 @@ void io_manager(void *args)
 {
   player1_value;
   player2_value;
-  // Wait for round manager notification
+
   for (;;) {
     // Wait until start notification
     ulTaskNotifyTake(pdTRUE, portMAX_Delay)
@@ -193,7 +198,7 @@ void io_manager(void *args)
     // start player tasks 1 and 2
     ulTaskNotifyGive(player1_handle)
     ulTaskNotifyGive(player2_handle)
-
+`
     // wait for both players
     xQueueReceive(player1_result, &player1_value, portMAX_DELAY)
     xQueueReceive(player2_result, &player2_value, portMAX_DELAY)
@@ -201,9 +206,19 @@ void io_manager(void *args)
     all_leds_off();
 
 
+    // TODO: maybe communicate both times to round manager instead?
+    // determine winner
+    // a draw is assumed to be impossible
+    if (player1_value < player2_value) {
+      player1_score++;
+    } else {
+      player2_score++;
+    }
+
+    buzz_once()
     
 
-    // determine winner
+    
     
     // winner indication (buzz, flash LEDs?)
     // notify round manager
@@ -214,13 +229,13 @@ void player(void *args)
 {
 
   inputQueue = args.inputQueue;
-  resultQuuee = args.resultQueue;
+  resultQueue = args.resultQueue;
   State receivedState;
 
   for (;;) {
     // wait until IO manager notifies start
     ulTaskNotifyTake(pdTRUE, portMAX_Delay)
-
+    uint32_t start_time = HAL_GetTick();
     // wait for input
 
     while(true) {
@@ -229,7 +244,8 @@ void player(void *args)
         if (xSemaphoreTake(gameStateMutex, portMAX_DELAY) == pdTRUE) {
           // correct input
           if (receivedState == gameState) { 
-            xQueueOverwrite(resultQueue, result)
+            end_time = HAL_GetTick() - start_time;
+            xQueueOverwrite(resultQueue, end_time)
             xSemaphoreGive(gameStateMutex); // release mutex
             break; // exit while loop and go back to initial waiting state again
           }
