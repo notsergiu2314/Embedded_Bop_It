@@ -53,7 +53,9 @@ static ExtiInput_t exti_input[] = {
 /* ------------------------------------------------------------------ */
 /* State                                                              */
 /* ------------------------------------------------------------------ */
-static osMessageQueueId_t input_queue = NULL;
+static osMessageQueueId_t input_queue[PLAYER_COUNT];   /* one per player */
+static osSemaphoreId_t    start_sem   = NULL;          /* released by B1 */
+static uint32_t           b1_last_us  = 0U;
 static osMutexId_t        spi_mutex   = NULL;
 static volatile uint16_t  adc_raw[PLAYER_COUNT];   /* [0] = A0 (P1), [1] = A1 (P2) */
 
@@ -65,11 +67,14 @@ static const uint8_t seg_digit[10] = {
 /* ------------------------------------------------------------------ */
 /* Init                                                               */
 /* ------------------------------------------------------------------ */
-void Board_Init(osMessageQueueId_t inputQueue)
+void Board_Init(const osMessageQueueId_t inputQueues[PLAYER_COUNT])
 {
-    input_queue = inputQueue;
+    for (int p = 0; p < PLAYER_COUNT; p++) {
+        input_queue[p] = inputQueues[p];
+    }
     spi_mutex = osMutexNew(NULL);
-    if (spi_mutex == NULL) {
+    start_sem = osSemaphoreNew(1U, 0U, NULL);      /* binary, starts empty */
+    if ((spi_mutex == NULL) || (start_sem == NULL)) {
         Error_Handler();
     }
 
@@ -91,6 +96,11 @@ void Board_Init(osMessageQueueId_t inputQueue)
 uint32_t Board_NowUs(void)
 {
     return __HAL_TIM_GET_COUNTER(&htim2);
+}
+
+bool Board_WaitStartButton(uint32_t timeout_ticks)
+{
+    return (osSemaphoreAcquire(start_sem, timeout_ticks) == osOK);
 }
 
 /* ------------------------------------------------------------------ */
@@ -131,8 +141,9 @@ static uint8_t prvSegments(uint8_t digit)
 void Board_DisplayScores(uint8_t scoreP1, uint8_t scoreP2)
 {
     /* The first byte shifted out ends up in the LAST chip of the chain.
-     * Chip 1 (MOSI side) = player 1, chip 2 (Q7' side) = player 2. */
-    uint8_t frame[2] = { prvSegments(scoreP2), prvSegments(scoreP1) };
+     * Chip 1 (MOSI side, right on the breadboard) = player 2,
+     * chip 2 (chained to Q7', left on the breadboard) = player 1. */
+    uint8_t frame[2] = { prvSegments(scoreP1), prvSegments(scoreP2) };
 
     osMutexAcquire(spi_mutex, osWaitForever);
     HAL_SPI_Transmit(&hspi1, frame, 2U, 10U);
@@ -162,6 +173,14 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     uint32_t now = Board_NowUs();      /* timestamp first, as early as possible */
 
+    if (GPIO_Pin == B1_Pin) {          /* blue button: start / restart */
+        if ((b1_last_us == 0U) || ((now - b1_last_us) >= DEBOUNCE_US)) {
+            b1_last_us = now;
+            (void)osSemaphoreRelease(start_sem);   /* fails harmlessly if already pending */
+        }
+        return;
+    }
+
     for (uint32_t i = 0; i < EXTI_INPUT_COUNT; i++) {
         ExtiInput_t *in = &exti_input[i];
         if (in->pin != GPIO_Pin) {
@@ -173,10 +192,9 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         in->last_us = now;
 
         InputEvent_t evt = { in->player, in->input, now };
-        if (input_queue != NULL) {
-            (void)osMessageQueuePut(input_queue, &evt, 0U, 0U);   /* timeout 0 in ISR */
+        if (input_queue[in->player] != NULL) {
+            (void)osMessageQueuePut(input_queue[in->player], &evt, 0U, 0U);   /* timeout 0 in ISR */
         }
         return;
     }
-    /* any other EXTI pin (e.g. the blue button B1) is ignored here */
 }

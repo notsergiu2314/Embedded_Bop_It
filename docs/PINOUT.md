@@ -1,7 +1,8 @@
 # Pinout - 2-player reaction game (NUCLEO-F401RE)
 
-Each player has: 1 push button, 1 slide switch, 1 potentiometer, and one cue LED per input,
-plus a 7-segment score display (0-9). Shared: 1 passive buzzer.
+Each player has: 1 push button, 1 slide switch, 1 potentiometer and a 7-segment score display (0-9).
+Shared: 1 passive buzzer and the **3 cue LEDs** (button, switch, pot): each LED of one player is
+linked to the matching LED of the other player, so both players must do the **same action** in a round.
 All 6 inputs go straight to the MCU (no input shift register), so the interrupt can timestamp
 a press with 1 microsecond accuracy.
 
@@ -53,19 +54,25 @@ Pins are written `Arduino name  MCU pin`. `->` = MCU output, `<-` = MCU input, `
 
 | MCU pin | Header | Label | What it does |
 |---|---|---|---|
-| PC7 | D9 | `LED_BTN_P1` | Lights when player 1 must press the button. |
-| PB8 | D15 | `LED_SW_P1` | Lights when player 1 must flip the switch. |
-| PB9 | D14 | `LED_POT_P1` | Lights when player 1 must turn the potentiometer. |
-| PA4 | A2 | `LED_BTN_P2` | Lights when player 2 must press the button. |
-| PB0 | A3 | `LED_SW_P2` | Lights when player 2 must flip the switch. |
-| PC1 | A4 | `LED_POT_P2` | Lights when player 2 must turn the potentiometer. |
+| PC7 | D9 | `LED_BTN_P1` | Lights when **both** players must press the button. |
+| PB8 | D15 | `LED_SW_P1` | Lights when **both** players must flip the switch. |
+| PB9 | D14 | `LED_POT_P1` | Lights when **both** players must turn the potentiometer. |
+| PA4 | A2 | `LED_BTN_P2` | Spare: only needed if the two button LEDs are not wired together. |
+| PB0 | A3 | `LED_SW_P2` | Spare: only needed if the two switch LEDs are not wired together. |
+| PC1 | A4 | `LED_POT_P2` | Spare: only needed if the two pot LEDs are not wired together. |
+
+**Each cue LED is shared by the two players:** the LED of one player is linked to the matching LED of
+the other player, so there are three cue lights (button, switch, pot) and in every round **both
+players must do the same action**. The first three pins are the ones that drive them. The code
+still sets the `_P2` pins together with the `_P1` pins (`game.c` loops over both players), so it
+works whether or not anything is connected to the spare pins.
 
 ### Displays and buzzer
 
 | MCU pin | Header | CubeMX mode / label | What it does |
 |---|---|---|---|
 | PB3 | D3 | SPI1_SCK | Shift clock to both 74HC595 chips. |
-| PB5 | D4 | SPI1_MOSI | Serial data to the first 74HC595 (SPI mode: Transmit Only Master). |
+| PB5 | D4 | SPI1_MOSI | Serial data to the first 74HC595 (player 2's display; it passes data on to player 1's). SPI mode: Transmit Only Master. |
 | PB10 | D6 | GPIO output, `LATCH_595` | Rising edge copies the shifted bits to the display outputs. |
 | PB6 | D10 | TIM4_CH1 (PWM) | Square wave for the passive buzzer; the frequency is the pitch. |
 
@@ -92,14 +99,16 @@ Pins are written `Arduino name  MCU pin`. `->` = MCU output, `<-` = MCU input, `
 * **Button:** one leg to the MCU pin, the other to GND (the internal pull-up does the rest).
 * **Slide switch:** middle pin (common) to the MCU pin, one outer pin to GND.
 * **Potentiometer:** outer pins to 3V3 and GND, middle pin (wiper) to the ADC pin. **Never 5 V.**
-* **Cue LED:** MCU pin -> resistor -> LED anode, LED cathode -> GND.
+* **Cue LED:** MCU pin -> resistor -> LED anode, LED cathode -> GND. The two LEDs of the same action (one per player) are linked and driven by the same pin.
 * **7-segment display (assumed common cathode):** segments a-g through a resistor each to the 595 outputs, common pin to GND. For common anode, wire the common to 3V3 and set `SEG_COMMON_ANODE 1` in `board.c`.
 * **Buzzer:** `+` to PB6, `-` to GND.
-* **Resistors:** 14 for the segments (7 per display) + 6 for the LEDs = 20 in total.
+* **Resistors:** one per display segment (7 per display) and one per cue LED.
 
-Two 74HC595 chained (DIP-16 pin numbers):
+Two 74HC595 chained (DIP-16 pin numbers). **Chip 1** is the one whose data pin is wired to the MCU
+(**right** on the breadboard) and drives the **player 2** display. **Chip 2** is chained to it
+(**left** on the breadboard) and drives the **player 1** display.
 
-| 595 pin | Chip 1 (player 1) | Chip 2 (player 2) |
+| 595 pin | Chip 1 (player 2, right) | Chip 2 (player 1, left) |
 |---|---|---|
 | 16 VCC | 3V3 | 3V3 |
 | 8 GND | GND | GND |
@@ -151,27 +160,31 @@ static const Pin_t led_pin[PLAYER_COUNT][INPUT_COUNT] = {
 };
 ```
 
-The rest of the program never mentions a pin. This is how the game logic will use it:
+The rest of the program never mentions a pin. This is how the game code uses it
+(see `docs/GAME.md` for the whole game):
 
 ```c
-Board_Init(inputQueue);                         /* once, after osKernelInitialize() */
+Board_Init(playerInputQueue);                   /* once; one queue per player */
 
 Board_LedSet(PLAYER_1, INPUT_BUTTON, true);     /* cue: player 1 must press */
 uint32_t cue_us = Board_NowUs();
 
 InputEvent_t e;
-if (osMessageQueueGet(inputQueue, &e, NULL, deadline_ticks) == osOK) {
+if (osMessageQueueGet(playerInputQueue[PLAYER_1], &e, NULL, ticks) == osOK) {
     uint32_t reaction_us = e.timestamp_us - cue_us;   /* 1 us resolution */
-    /* e.player / e.input tell who did what: correct, wrong or early */
+    /* e.input tells which control the player used */
 }
 
 Board_DisplayScores(score1, score2);            /* 0..9 on the two displays */
 Board_BuzzerTone(880);                          /* beep; Board_BuzzerTone(0) = silent */
+Board_WaitStartButton(osWaitForever);           /* blue button B1 */
 ```
 
-* Button and switch edges arrive as `InputEvent_t` in the queue (timestamped in the interrupt, 30 ms debounce).
-* The pot is **not** an event: the pot task reads `Board_PotRead(player)` periodically (about every 1 ms) and decides when it has reached the target zone.
+* Button and switch edges arrive as `InputEvent_t` in the queue **of the player they belong to**
+  (timestamped in the interrupt, 30 ms debounce).
+* The pot is **not** an event: the player task reads `Board_PotRead(player)` about every 1 ms.
 * `Board_DisplayScores()` and the 595 latch are protected by a mutex, so any task may call them.
+* The blue button B1 (PC13) releases a semaphore: `Board_WaitStartButton()` returns when it is pressed.
 
 ## 6. Things to check on the real board
 
