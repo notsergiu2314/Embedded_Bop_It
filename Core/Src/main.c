@@ -239,8 +239,10 @@ void all_leds_off()
 
 // ---- 7-segment displays: two 74HC595 chained on SPI1 (right chip = player 2, left chip = player 1) ----
 // bit0 = segment a ... bit6 = g (595 outputs QA..QG)
-static const uint8_t seg_digit[10] = { 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
-
+static const uint8_t seg_digit[10] = {
+    0xC0, 0xF9, 0xA4, 0xB0, 0x99,
+    0x92, 0x82, 0xF8, 0x80, 0x90
+};
 static uint8_t seg_pattern(size_t digit)
 {
   uint8_t v = seg_digit[digit > 9 ? 9 : digit];
