@@ -63,16 +63,52 @@ typedef struct {
   uint32_t player2_time;
 } Time_Result;
 
+// Game settings
+#define SCORE_THRESHOLD 9
+#define TWIST_ENABLED   1      // 0 = TWIST is never asked (only BOP and PULL), e.g. to test without the pots
+#define ROUND_PAUSE_MS  1000   // pause before every round so the players can get ready
+#define DEBOUNCE_MS     30     // after a button/switch edge, further edges on that pin are ignored for this long
+#define TWIST_THRESHOLD 1000   // ADC counts (of 4095) a pot must move from its position at the cue
+#define POT_POLL_MS     1      // how often the pots are checked
+
+// Round timing
+#define ROUND_TIMEOUT_START_MS  3000
+#define ROUND_TIMEOUT_STEP_MS   100   // shorten a round by this amount
+#define ROUND_TIMEOUT_MIN_MS    1000
+#define LATE_GRACE_MS           500     // after the limit a correct input is still noticed and reported as "late" (no point). 0 = off
+#define NO_REACTION             0xFFFFFFFFu   // "reaction time" of a player who did not react at all
+
+// Outputs
+#define SEG_COMMON_ANODE  0     // set to 1 if the 7-segment displays are common anode
+// Buzzer default parameters
+#define BEEP_HZ           1000
+#define BEEP_MS           100
+
+// Task priorities
+#define PRIO_PLAYER     osPriorityAboveNormal
+#define PRIO_IO         osPriorityAboveNormal
+#define PRIO_ROUND      osPriorityNormal
+#define PRIO_SCORE      osPriorityBelowNormal
+#define PRIO_POT        osPriorityAboveNormal
+
+// Stack settings
+#define STACK_WORDS     256
+#define STACK_ROUND_WORDS 512   // the round manager formats text for the UART log
+
 // semaphores and mutexes
 
 static SemaphoreHandle_t gameStateMutex;
 static State gameState;
 
-static const size_t SCORE_THRESHOLD = 3;
+static SemaphoreHandle_t scoreMutex;
 static size_t player1_score = 0; 
 static size_t player2_score = 0;
 
-// Handles for timers
+// best (shortest) on-time reaction of each player, in ms
+static uint32_t best_time[2] = { NO_REACTION, NO_REACTION };
+
+// time to react in a round (changed by the round manager)
+static volatile uint32_t round_timeout_ms = ROUND_TIMEOUT_START_MS;   
 
 // Handles for tasks
 TaskHandle_t round_manager_handle = NULL;
@@ -96,20 +132,24 @@ QueueHandle_t io_manager_result;
 
 // Enum aliases for various pins.
 
+// convenience struct for pin info. Uses CubeMX user labels.
+typedef struct {
+  GPIO_TypeDef *port;
+  uint16_t pin;
+} Pin;
+
 // Indicator lights
-uint16_t led_twist;
-uint16_t led_bop;
-uint16_t led_pull;
+static const Pin led_twist = { LED_POT_P1_GPIO_Port, LED_POT_P1_Pin };   // D14
+static const Pin led_bop   = { LED_BTN_P1_GPIO_Port, LED_BTN_P1_Pin };   // D9
+static const Pin led_pull  = { LED_SW_P1_GPIO_Port,  LED_SW_P1_Pin };    // D15
 
 // Inputs Player 1 
-uint16_t pin_twist1;
-uint16_t pin_bop1;
-uint16_t pin_pull1;
+static const uint16_t pin_bop1   = BTN_P1_Pin;   // PA10 (D2)
+static const uint16_t pin_pull1  = SW_P1_Pin;    // PB4  (D5)
 
 // Inputs player 2
-uint16_t pin_twist2;
-uint16_t pin_bop2;
-uint16_t pin_pull2;
+static const uint16_t pin_bop2   = BTN_P2_Pin;   // PA8  (D7)
+static const uint16_t pin_pull2  = SW_P2_Pin;    // PA9  (D8)
 
 // 7 seg displays for score
 uint16_t pin_score;
@@ -120,6 +160,25 @@ uint16_t pin_score;
 uint16_t pin_buzzer;
 
 /* USER CODE END PV */
+
+// ---- Buzzer: passive piezo, TIM4 channel 1 PWM on PB6. The timer counts at 1 MHz. ----
+void buzzer_tone(uint32_t hz)
+{
+  if (hz == 0) {
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 0);          // silent
+    return;
+  }
+  uint32_t period = 1000000u / hz;
+  __HAL_TIM_SET_AUTORELOAD(&htim4, period - 1);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, period / 2);   // 50 % duty
+}
+
+void buzz(uint32_t hz, uint32_t ms)
+{
+  buzzer_tone(hz);
+  vTaskDelay(pdMS_TO_TICKS(ms));
+  buzzer_tone(0);
+}
 
 uint32_t random(uint32_t seed)
 {
@@ -138,14 +197,45 @@ State get_random_gameState() {
 
 void buzz_once()
 {
-  //TODO: buzzer implementation
+  buzz(BEEP_HZ, BEEP_MS);
+}
+
+void led_write(const Pin *led, GPIO_PinState state)
+{
+  HAL_GPIO_WritePin(led->port, led->pin, state);
 }
 
 void all_leds_off()
 {
-  HAL_GPIO_WritePin(GPIOA, led_twist, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOA, led_bop, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOA, led_pull, GPIO_PIN_RESET);
+  led_write(&led_twist, GPIO_PIN_RESET);
+  led_write(&led_bop, GPIO_PIN_RESET);
+  led_write(&led_pull, GPIO_PIN_RESET);
+}
+
+// ---- 7-segment displays: two 74HC595 chained on SPI1 (left chip = player 1, right chip = player 2) ----
+// bit0 = segment a ... bit6 = g (595 outputs QA..QG)
+static const uint8_t seg_digit[10] = {
+    0xC0, 0xF9, 0xA4, 0xB0, 0x99,
+    0x92, 0x82, 0xF8, 0x80, 0x90
+};
+
+static uint8_t seg_pattern(size_t digit)
+{
+  uint8_t v = seg_digit[digit > 9 ? 9 : digit];
+#if SEG_COMMON_ANODE
+  v = (uint8_t)~v;
+#endif
+  return v;
+}
+
+// Show input values on 7-segment dispalys
+void display_show(size_t score1, size_t score2)
+{
+  // the first byte clocked out ends up in the last chip of the chain: player 1 (left) goes first
+  uint8_t frame[2] = { seg_pattern(score1), seg_pattern(score2) };
+  HAL_SPI_Transmit(&hspi1, frame, 2, 10);
+  HAL_GPIO_WritePin(LATCH_595_GPIO_Port, LATCH_595_Pin, GPIO_PIN_SET);    // outputs take the new bits
+  HAL_GPIO_WritePin(LATCH_595_GPIO_Port, LATCH_595_Pin, GPIO_PIN_RESET);
 }
 
 void round_manager(void *args) {
@@ -154,6 +244,9 @@ void round_manager(void *args) {
 
     // Turn off all LEDs
     all_leds_off();
+
+    // short pause so the players can get ready
+    vTaskDelay(pdMS_TO_TICKS(ROUND_PAUSE_MS));
 
     // reset inputs and outputs (except scores)
     // buzz once
@@ -196,12 +289,12 @@ void round_manager(void *args) {
 
 void io_manager(void *args) 
 {
-  player1_value;
-  player2_value;
+  uint32_t player1_value;
+  uint32_t player2_value;
 
   for (;;) {
     // Wait until start notification
-    ulTaskNotifyTake(pdTRUE, portMAX_Delay)
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     
     // pick a random game state.
     if (xSemaphoreTake(gameStateMutex, portMAX_DELAY) == pdTRUE) {
@@ -209,27 +302,30 @@ void io_manager(void *args)
       xSemaphoreGive(gameStateMutex);
     }
 
-    // Turn on the correct LEDs
+    // Discard irrelevant inputs outside of this round.
+    xQueueReset(player1_input);
+    xQueueReset(player2_input);
 
+    // Turn on the correct LEDs
     switch (gameState) {
       case BOP:
-        HAL_GPIO_WritePin(GPIOA, led_bop, GPIO_PIN_SET);
+        led_write(&led_bop, GPIO_PIN_SET);
       break;
       case TWIST:
-        HAL_GPIO_WritePin(GPIOA, led_twist, GPIO_PIN_SET);
+        led_write(&led_twist, GPIO_PIN_SET);
       break;
       case PULL:
-        HAL_GPIO_WritePin(GPIOA, led_pull, GPIO_PIN_SET);
+        led_write(&led_pull, GPIO_PIN_SET);
       break;
     }
 
     // start player tasks 1 and 2
-    ulTaskNotifyGive(player1_handle)
-    ulTaskNotifyGive(player2_handle)
-`
+    xTaskNotifyGive(player1_handle);
+    xTaskNotifyGive(player2_handle);
+
     // wait for both players
-    xQueueReceive(player1_result, &player1_value, portMAX_DELAY)
-    xQueueReceive(player2_result, &player2_value, portMAX_DELAY)
+    xQueueReceive(player1_result, &player1_value, portMAX_DELAY);
+    xQueueReceive(player2_result, &player2_value, portMAX_DELAY);
     
     all_leds_off();
 
@@ -238,53 +334,122 @@ void io_manager(void *args)
     // a draw is assumed to be impossible
     // uint32_t winner = 1 + (player2_value  < player1_value);
 
-    buzz_once()
+    buzz_once();
     
-
-    
-    
-    // winner indication (buzz, flash LEDs?)
-    // notify round manager
+    // send results back to round manager.
+    Time_Result result = { player1_value, player2_value };
+    xQueueSend(io_manager_result, &result, portMAX_DELAY);
   }
 }
 
 void player(void *args)
 {
 
-  inputQueue = args.inputQueue;
-  resultQueue = args.resultQueue;
+  Player_Args* player_args = (Player_Args*) args;
+
+  QueueHandle_t inputQueue = player_args->inputQueue;
+  QueueHandle_t resultQueue = player_args->resultQueue;
   State receivedState;
 
   for (;;) {
-    // wait until IO manager notifies start
-    ulTaskNotifyTake(pdTRUE, portMAX_Delay)
-    uint32_t start_time = HAL_GetTick();
-    // wait for input
+    // Wait until IO manager notifies start
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-    while(true) {
-      // wait for ISR message
-      if(xQueueReceive(inputQueue, &receivedState, portMAX_DELAY) == pdPASS) {
+    // Timing
+    uint32_t start_time = HAL_GetTick();
+    uint32_t max_time = round_timeout_ms + LATE_GRACE_MS;
+    uint32_t elapsed = 0;
+    uint32_t reaction = NO_REACTION;
+    
+    // wait for input
+    while(elapsed < max_time) {
+      // wait for ISR message until timeout.
+      if (xQueueReceive(inputQueue, &receivedState, pdMS_TO_TICKS(max_time - elapsed)) == pdPASS) {
+        // Get game state mutex to verify player input
         if (xSemaphoreTake(gameStateMutex, portMAX_DELAY) == pdTRUE) {
           // correct input
           if (receivedState == gameState) { 
-            end_time = HAL_GetTick() - start_time;
-            xQueueOverwrite(resultQueue, end_time)
+            reaction = HAL_GetTick() - start_time;
             xSemaphoreGive(gameStateMutex); // release mutex
             break; // exit while loop and go back to initial waiting state again
           }
-          // release mutex, go back to waiting for input
-          xSemaphoreGive(gameStateMutex)
+          // Release mutex, go back to waiting for input
+          xSemaphoreGive(gameStateMutex);
         }
       }
+      elapsed = HAL_GetTick() - start_time;
     }
+    xQueueOverwrite(resultQueue, &reaction);
   }
 }
 
-void score_manager(void *args) {
+void score_manager(void *args) 
+{
   for (;;) {
     // wait until notification is received
-    // read score mutex 
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+    // read score mutex
+    xSemaphoreTake(scoreMutex, portMAX_DELAY);
+    size_t score1 = player1_score;
+    size_t score2 = player2_score;
+    xSemaphoreGive(scoreMutex);
+
     // update 7 seg displays
+    display_show(score1, score2);
+  }
+}
+
+void game_init(void)
+{
+  // ADC + DMA (circular) keep pot_raw up to date. The DMA interrupt is not needed and would fire
+  // about 200 000 times per second, so it is switched off in the NVIC (the transfers keep running).
+  if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)pot_raw, 2) != HAL_OK) {
+    Error_Handler();
+  }
+  HAL_NVIC_DisableIRQ(DMA2_Stream0_IRQn);
+
+  // buzzer: PWM running with the compare value 0 (silent); buzzer_tone() sets the pitch
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+  buzzer_tone(0);
+
+  // displays: 0 - 0
+  display_show(0, 0);
+
+  gameStateMutex = xSemaphoreCreateMutex();
+  scoreMutex = xSemaphoreCreateMutex();
+
+  // ISR -> players: one State per button press, a few can wait
+  player1_input = xQueueCreate(8, sizeof(State));
+  player2_input = xQueueCreate(8, sizeof(State));
+  // players -> IO manager: only the latest reaction time (xQueueOverwrite needs length 1)
+  player1_result = xQueueCreate(1, sizeof(uint32_t));
+  player2_result = xQueueCreate(1, sizeof(uint32_t));
+  // IO manager -> round manager
+  io_manager_result = xQueueCreate(1, sizeof(Time_Result));
+
+  if (gameStateMutex == NULL || scoreMutex == NULL || player1_input == NULL || player2_input == NULL ||
+      player1_result == NULL || player2_result == NULL || io_manager_result == NULL) {
+    Error_Handler();
+  }
+
+  Player_Args player1_args  = {
+    .inputQueue = player1_input,
+    .resultQueue = player1_result;
+  }
+
+  Player_Args player2_args  = {
+    .inputQueue = player2_input,
+    .resultQueue = player2_result;
+  }
+
+  if (xTaskCreate(io_manager, "io_manager", STACK_WORDS, NULL, PRIO_IO, &io_manager_handle) != pdPASS ||
+      xTaskCreate(player, "player1", STACK_WORDS, &player1_args, PRIO_PLAYER, &player1_handle) != pdPASS ||
+      xTaskCreate(player, "player2", STACK_WORDS, &player2_args, PRIO_PLAYER, &player2_handle) != pdPASS ||
+      xTaskCreate(score_manager, "score_manager", STACK_WORDS, NULL, PRIO_SCORE, &score_manager_handle) != pdPASS ||
+      xTaskCreate(round_manager, "round_manager", STACK_ROUND_WORDS, NULL, PRIO_ROUND, &round_manager_handle) != pdPASS ||
+      xTaskCreate(pot_monitor, "pot_monitor", 128, NULL, PRIO_POT, &pot_monitor_handle) != pdPASS) {
+    Error_Handler();
   }
 }
 
@@ -307,7 +472,6 @@ void MX_FREERTOS_Init(void);
   */
 int main(void)
 {
-State
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -340,7 +504,7 @@ State
 
   /* USER CODE END 2 */
 
-  /* Init schedStateuler */
+  /* Init scheduler */
   osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
   MX_FREERTOS_Init();
 
@@ -441,9 +605,6 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     if (GPIO_Pin == pin_bop1) {
         queue = player1_input;
         state = BOP;
-    } else if (GPIO_Pin == pin_twist1) {
-        queue = player1_input;
-        state = TWIST;
     } else if (GPIO_Pin == pin_pull1) {
         queue = player1_input;
         state = PULL;
@@ -451,12 +612,21 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     } else if (GPIO_Pin == pin_bop2) {
         queue = player2_input;
         state = BOP;
-    } else if (GPIO_Pin == pin_twist2) {
-        queue = player2_input;
-        state = TWIST;
     } else if (GPIO_Pin == pin_pull2) {
         queue = player2_input;
         state = PULL;
+    } else if (GPIO_Pin == B1_Pin) {
+      // Restart the game
+
+      static uint32_t last_b1_ms;
+      uint32_t now_b1 = HAL_GetTick();
+      if ((now_b1 - last_b1_ms) >= DEBOUNCE_MS) {
+          last_b1_ms = now_b1;
+          if (round_manager_handle != NULL)
+            vTaskNotifyGiveFromISR(round_manager_handle, &higher_priority_task_woken);
+      }
+      portYIELD_FROM_ISR(higher_priority_task_woken);
+      return; 
     } else {
         return;  // Irrelevant
     }
@@ -464,7 +634,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     if (queue != NULL) {
       xQueueSendFromISR(queue, &state, &higher_priority_task_woken);
     }
-
+ 
     portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
