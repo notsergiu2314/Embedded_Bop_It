@@ -190,20 +190,28 @@ void buzz(uint32_t hz, uint32_t ms)
   buzzer_tone(0);
 }
 
-uint32_t random(uint32_t seed)
+// xorshift32 pseudo random generator. It keeps its state between calls.
+static uint32_t random_state = 0;
+
+uint32_t random_next(void)
 {
-    uint32_t x = seed;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    seed = x;
-    return x;
+  if (random_state == 0) {
+    // define random state.
+    random_state = (HAL_GetTick() ^ (SysTick->VAL << 8)) | 1u;
+  }
+  uint32_t x = random_state;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  random_state = x;
+  return x;
 }
 
 State get_random_gameState() {
-  size_t state_count = 3;
-  return (State) (random(HAL_GetTick() % state_count));
+  // the states that can be asked (TWIST only once the pot is implemented)
+  return (State) (random_next() % 3);
 }
+
 
 void buzz_once()
 {
