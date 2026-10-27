@@ -68,7 +68,7 @@ typedef struct {
   uint32_t player2_time;
 } Time_Result;
 
-// Arguments handed to each player task on craetion
+// Arguments handed to each player task on creation
 typedef struct {
   QueueHandle_t inputQueue;   // ISR -> player
   QueueHandle_t resultQueue;  // player -> IO manager
@@ -520,6 +520,7 @@ void io_manager(void *args)
     xQueueReceive(player1_result, &player1_value, portMAX_DELAY);
     xQueueReceive(player2_result, &player2_value, portMAX_DELAY);
     
+    pot_disarm();
     set_all_leds(GPIO_PIN_RESET);
 
 
@@ -593,6 +594,10 @@ void score_manager(void *args)
   }
 }
 
+// Creates the mutex, the queues and the tasks. Called once from main(), before the scheduler starts.
+static Player_Args player1_args;
+static Player_Args player2_args;
+
 void game_init(void)
 {
   // ADC + DMA (circular) keep pot_raw up to date. The DMA interrupt is not needed and would fire
@@ -627,12 +632,12 @@ void game_init(void)
     Error_Handler();
   }
 
-  Player_Args player1_args  = {
+  player1_args  = {
     .inputQueue = player1_input,
     .resultQueue = player1_result
   };
 
-  Player_Args player2_args  = {
+  player2_args  = {
     .inputQueue = player2_input,
     .resultQueue = player2_result
   };
