@@ -632,15 +632,10 @@ void game_init(void)
     Error_Handler();
   }
 
-  player1_args  = {
-    .inputQueue = player1_input,
-    .resultQueue = player1_result
-  };
-
-  player2_args  = {
-    .inputQueue = player2_input,
-    .resultQueue = player2_result
-  };
+  player1_args.inputQueue = player1_input;
+  player1_args.resultQueue = player1_result;
+  player2_args.inputQueue = player2_input;
+  player2_args.resultQueue = player2_result;
 
   // Create all tasks with error handling.
   if (xTaskCreate(io_manager, "io_manager", STACK_WORDS, NULL, PRIO_IO, &io_manager_handle) != pdPASS ||
