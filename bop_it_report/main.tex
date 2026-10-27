@@ -1,0 +1,361 @@
+% Bop-It term project: final report (draft)
+%
+% Build: pdflatex -> bibtex -> pdflatex -> pdflatex (Overleaf does this automatically).
+%
+%   \todo{...}  red: must be done or checked before submission.
+%   \plan{...}  blue italics: one sentence on what the section will contain. Replace with text.
+%   \figbox{name}{width}{height}{description}  shows figures/name.pdf|png|jpg|jpeg if it
+%     exists, otherwise a red placeholder box.
+% Delete all three macros and their uses before submitting.
+
+\documentclass[11pt, a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{mathptmx}
+\usepackage[a4paper, margin=1in]{geometry}
+\setlength{\emergencystretch}{3em}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{siunitx}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstset{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2
+}
+
+% ---------- draft helpers (remove before submitting) ----------
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+\newcommand{\plan}[1]{\begingroup\color{blue!55!black}\itshape #1\par\endgroup}
+\newcommand{\figbox}[4]{%
+  \IfFileExists{figures/#1.pdf}{\includegraphics[width=#2]{figures/#1.pdf}}{%
+  \IfFileExists{figures/#1.png}{\includegraphics[width=#2]{figures/#1.png}}{%
+  \IfFileExists{figures/#1.jpg}{\includegraphics[width=#2]{figures/#1.jpg}}{%
+  \IfFileExists{figures/#1.jpeg}{\includegraphics[width=#2]{figures/#1.jpeg}}{%
+  \fbox{\parbox[c][#3][c]{\dimexpr#2-2\fboxsep-2\fboxrule\relax}{\centering\small\color{red}%
+    Placeholder: \texttt{figures/#1.*}\\[2pt] #4}}}}}}}
+
+\title{\textbf{Timing Accuracy in a Two-Player Bop-It Reaction Game\\ on an STM32 with FreeRTOS}}
+\author{Preda Sergiu-Adrian (S6778542) \and Chingiz Dadashov-Khandan (S3591077)\\[4pt]
+\normalsize Embedded Systems (WMCS050-05), University of Groningen}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We built a two-player reaction game in the style of Bop~It on a NUCLEO-F401RE board (STM32F401RE) running FreeRTOS. In every round the microcontroller lights one of three cue LEDs at random, and the two players compete to be first to press a button, flip a switch or turn a potentiometer. The time limit shrinks each round, scores appear on two seven-segment displays, and a buzzer and a serial log give feedback. Six tasks share the work and communicate through queues, task notifications and a mutex. The recorded time of a press depends on interrupt latency, task scheduling and clock resolution. We compare recording the time in the player task from the 1~kHz RTOS tick with recording it in the interrupt handler from a 1~MHz hardware timer. \todo{Add the main numbers and the conclusion once the experiments are done.}
+\end{abstract}
+
+% =====================================================================
+\section{Introduction}
+\label{sec:intro}
+
+This report describes a two-player reaction game in the style of the toy Bop~It~\cite{bopit}, built on a NUCLEO-F401RE board (STM32F401RE, Arm Cortex-M4F) with FreeRTOS. The original toy announces one of three commands (\emph{Bop it}, \emph{Twist it} or \emph{Pull it}) and the player must perform the matching action before a time limit runs out. In our version two players compete. In every round the microcontroller picks one of the three actions at random and lights the corresponding cue LED, which both players see. Each player has a push button (bop), a potentiometer (twist) and a slide switch (pull), and the first player to perform the requested action scores. The time limit starts at \SI{3}{\second} and shrinks to \SI{1}{\second}, and the first player to reach 9 points wins.
+
+\subsection{Problem statement}
+
+The project follows the ``Reaction-Based Two-Player Game System'' topic of the course. The system must generate random cues, tell correct, incorrect, late and early responses apart, keep scores and reaction-time statistics, and use several threads. Because players may respond almost together, it must also determine the order of responses accurately.
+
+The ordering is the difficult part. Human reaction times are a few hundred milliseconds~\cite{woods2015}, so two similar players can be separated by a few milliseconds. The time recorded for a press, however, is not the time the contact closed: interrupt latency, the time until the recording task is scheduled and the resolution of the clock all add error. If this error differs between the players or exceeds their gap, the wrong player gets the point. This report builds the game and evaluates how much the choice of timestamping method matters.
+% Research questions were dropped on purpose; the problem above is evaluated by Experiments 1 and 2.
+
+% =====================================================================
+\section{Background}
+\label{sec:background}
+
+\plan{Short context for the original toy, human reaction time and the delays between a physical event and its timestamp, citing only what we used.}
+
+\subsection{The original toy and reaction time}
+\plan{Bop~It~\cite{bopit} gives one of three commands and speeds up; human simple reaction time is a few hundred milliseconds~\cite{woods2015}.}
+
+\subsection{Capturing the time of an input}
+\plan{The sources of delay (bounce, interrupt, scheduling, clock resolution), with the STM32F401 timers and ADC~\cite{rm0368} and the FreeRTOS mechanisms~\cite{barry2016}.}
+
+% =====================================================================
+\section{Requirements and Method}
+\label{sec:method}
+
+\subsection{Requirements}
+\label{sec:requirements}
+
+\plan{Table~\ref{tab:requirements} lists the requirements from the project text and how the current code covers them.}
+
+\begin{table}[h]
+    \centering
+    \small
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabularx}{\textwidth}{@{}l>{\raggedright\arraybackslash}p{4.6cm}>{\raggedright\arraybackslash}X l@{}}
+        \toprule
+        \textbf{ID} & \textbf{Requirement} & \textbf{Realised by} & \textbf{Status} \\
+        \midrule
+        R1 & One of three cue LEDs is lit at random. & \texttt{io\_manager} picks \texttt{BOP}, \texttt{TWIST} or \texttt{PULL} with an xorshift32 generator, seeded at the first cue from the tick count and the SysTick counter. & Done \\
+        R2 & Players must respond within a specified time, and the time gets shorter. & Limit of \SI{3000}{\milli\second}, reduced by \SI{100}{\milli\second} per round down to \SI{1000}{\milli\second}. & Done \\
+        R3 & Correct responses are recognised. & The player task accepts only the event that matches the cue and records the reaction time. & Done \\
+        R4 & Incorrect responses are recognised. & Ignored by the player task; not counted or reported. & Partial \\
+        R5 & Late responses are recognised. & Players keep listening \SI{500}{\milli\second} after the limit; such a response is logged as late and earns no point. & Done \\
+        R6 & Presses before the cue are recognised. & Input queues are emptied right before the cue, so early presses do not count; they are not counted separately. & Partial \\
+        R7 & The order of nearly simultaneous responses is determined accurately. & Currently the \SI{1}{\kilo\hertz} tick read in the player task; an exact tie goes to player 2. & Open (Exp.~1, 2) \\
+        R8 & Threads handle generation, timing, input, verification, scoring and status. & Six application tasks (Table~\ref{tab:tasks}). Timeouts are handled inside the player tasks. & Done \\
+        R9 & Scores and reaction-time statistics are kept per player. & Scores behind a mutex; best in-time reaction per player. No average or worst time. & Partial \\
+        R10 & Visual and audio status feedback. & Cue LEDs, two displays, buzzer, serial log. & Done \\
+        \bottomrule
+    \end{tabularx}
+    \caption{Requirements derived from the project text and their current status.}
+    \label{tab:requirements}
+\end{table}
+\todo{Update the Status column when the code changes. Decide whether R4 and R6 will be implemented before the final run or reported as limitations.}
+
+\subsection{Experimental method}
+\label{sec:method-exp}
+
+\plan{We compare timestamping in the player task from the 1~kHz tick (A) with timestamping in the interrupt from the 1~MHz timer TIM2 (B), using two experiments: timestamp latency, and wrong decisions versus the offset between two inputs.}
+% Details for later: spare GPIO pins (e.g. PA6, PA7) in open-drain mode wired to the two button
+% inputs generate falling edges at a chosen offset Delta with TIM2 as time base (random phase
+% against the 1 ms tick). Experiment 1: latency min/mean/p99/max with and without load.
+% Experiment 2: sweep Delta (0..5 ms, both signs), N trials each, fraction of wrong decisions
+% and ties for A and B. Threats: loopback has no bounce, shared TIM2 clock, one board,
+% measured maximum is not a WCET, pot not covered.
+
+% =====================================================================
+\section{System Design and Implementation}
+\label{sec:design}
+
+\subsection{Hardware}
+\label{sec:hardware}
+
+\plan{One button, switch and potentiometer per player, three shared cue LEDs, two seven-segment displays on chained 74HC595 shift registers~\cite{sn74hc595}, a passive buzzer and the blue button B1 (pin map in Appendix~\ref{app:pins}).}
+
+\begin{figure}[h!]
+    \centering
+    \figbox{fig-hardware-photo}{0.7\textwidth}{4cm}{Photo of the assembled game, labelled.}
+    \caption{The assembled game.}
+    \label{fig:hardware-photo}
+\end{figure}
+
+\begin{figure}[h!]
+    \centering
+    \figbox{fig-wiring}{0.85\textwidth}{5cm}{Wiring diagram (draw.io or Fritzing): inputs, cue LEDs, 74HC595 chain, displays, buzzer.}
+    \caption{Wiring of the game.}
+    \label{fig:wiring}
+\end{figure}
+
+\subsection{Software architecture}
+\label{sec:architecture}
+
+\plan{Six tasks (Table~\ref{tab:tasks}) communicate through queues, task notifications and one mutex (Figure~\ref{fig:architecture}).}
+
+\begin{table}[h!]
+    \centering
+    \small
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabularx}{\textwidth}{@{}l l r >{\raggedright\arraybackslash}p{3.3cm} >{\raggedright\arraybackslash}X@{}}
+        \toprule
+        \textbf{Task} & \textbf{Priority} & \textbf{Stack} & \textbf{Blocks on} & \textbf{Role} \\
+        \midrule
+        \texttt{round\_manager} & Normal & 512 & notification (B1), result queue of the I/O manager & Game loop: rounds, time limit, classification, winner of the round, scores, UART log, win state. \\
+        \texttt{io\_manager} & Above normal & 256 & notification from the round manager, result queues of the players & Picks the cue, lights the LED, starts both players, collects both results. \\
+        \texttt{player1}, \texttt{player2} & Above normal & 256 & notification, input queue with timeout & Wait for the cued input of their player, ignore the others, measure the reaction time. One function, two instances. \\
+        \texttt{pot\_monitor} & Above normal & 128 & \texttt{vTaskDelayUntil} (\SI{1}{\milli\second}) & Compares the ADC values with the position at the cue and queues a twist event. \\
+        \texttt{score\_manager} & Below normal & 256 & notification & Reads the scores under the mutex and updates the displays. \\
+        \texttt{defaultTask} (CubeMX) & Normal & 128 & \texttt{osDelay(1)} & Unused. \\
+        \bottomrule
+    \end{tabularx}
+    \caption{Tasks of the application. Priorities are the CMSIS-RTOS values 16 (below normal), 24 (normal) and 32 (above normal); stack sizes are in 4-byte words.}
+    \label{tab:tasks}
+\end{table}
+\todo{The CubeMX \texttt{defaultTask} still wakes every millisecond. Remove it or mention it as overhead.}
+
+\begin{figure}[h!]
+    \centering
+    \figbox{fig-architecture}{0.9\textwidth}{5cm}{Tasks, queues, notifications, mutex, ISRs and the hardware they drive. Redraw in draw.io from the current main.c.}
+    \caption{Software architecture.}
+    \label{fig:architecture}
+\end{figure}
+
+\subsection{Game logic}
+\label{sec:game}
+
+\plan{One round: pause, start beep, random cue, both players react, reactions are classified as in time, late or none, the faster in-time player scores, and the game ends at 9 points (Figure~\ref{fig:sequence}, Table~\ref{tab:parameters}).}
+
+\begin{figure}[h!]
+    \centering
+    \figbox{fig-sequence}{0.9\textwidth}{6cm}{Sequence diagram of one round: B1, round manager, I/O manager, players, ISR, score manager; include the time limit, the queue reset before the cue and the late/none classification.}
+    \caption{Sequence of one round.}
+    \label{fig:sequence}
+\end{figure}
+
+\begin{table}[h!]
+    \centering
+    \small
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{4.6cm}lX@{}}
+        \toprule
+        \textbf{Parameter} & \textbf{Value} & \textbf{Note} \\
+        \midrule
+        Points to win & 9 & One display digit. \\
+        Time limit per round & \SI{3000}{\milli\second} $\to$ \SI{1000}{\milli\second} & Shrinks by \SI{100}{\milli\second} per round. \\
+        Late window & \SI{500}{\milli\second} & A correct input after the limit is still logged as late. \\
+        Debounce & \SI{30}{\milli\second} & Later edges on the same pin are ignored; the first edge is not delayed. \\
+        Twist threshold & 1000 of 4095 counts & About a quarter of the range from the position at the cue. \\
+        System clock, RTOS tick & \SI{84}{\mega\hertz}, \SI{1}{\kilo\hertz} & HSI with PLL. \\
+        \bottomrule
+    \end{tabularx}
+    \caption{Main parameters of the implementation.}
+    \label{tab:parameters}
+\end{table}
+
+\subsection{Input handling and timestamping}
+\label{sec:input}
+
+\plan{Buttons and switches raise interrupts that queue an event for the owning player, the potentiometers are sampled every millisecond through ADC and DMA, and Figure~\ref{fig:timeline} shows where implementations A and B read the clock.}
+
+\begin{figure}[h!]
+    \centering
+    \figbox{fig-timeline}{0.9\textwidth}{4.5cm}{Timeline of one press: contact closes, bounce, interrupt, event queued, task wakes, clock read. Mark where A and B read the clock.}
+    \caption{Where the time of a press is captured in A and B.}
+    \label{fig:timeline}
+\end{figure}
+
+% =====================================================================
+\section{Experiments and Results}
+\label{sec:results}
+
+\subsection{Functional verification}
+
+\plan{Each test in Table~\ref{tab:tests} is run on the board, with one serial log of a full game (Figure~\ref{fig:serial}).}
+
+\begin{table}[h!]
+    \centering
+    \small
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabularx}{\textwidth}{@{}l>{\raggedright\arraybackslash}p{4.3cm}>{\raggedright\arraybackslash}X l@{}}
+        \toprule
+        \textbf{Test} & \textbf{Procedure} & \textbf{Expected} & \textbf{Observed} \\
+        \midrule
+        Nominal & Both players do the cued action. & Faster player scores; both times logged. & TBD \\
+        Wrong input & Operate a control that is not cued. & Ignored; round continues. & TBD \\
+        Early press & Press the cued button before the cue. & Does not count as a reaction. & TBD \\
+        Late response & React after the limit, within the late window. & Logged as late; no point. & TBD \\
+        No reaction & Nobody reacts. & Round ends after limit and late window; nobody scores. & TBD \\
+        Near-simultaneous & Both react within \SI{1}{\milli\second}. & Correct order, or tie rule applied. & TBD \\
+        Contact bounce & One press of a worn button. & One event per press. & TBD \\
+        Full game & Play to 9 points, then press B1. & Winner sequence; new game starts. & TBD \\
+        \bottomrule
+    \end{tabularx}
+    \caption{Functional tests.}
+    \label{tab:tests}
+\end{table}
+
+\begin{figure}[h]
+    \centering
+    \figbox{fig-serial-log}{0.9\textwidth}{3.5cm}{Screenshot of the serial terminal during a game.}
+    \caption{Serial log of a game.}
+    \label{fig:serial}
+\end{figure}
+
+\subsection{Experiment 1: timestamp latency}
+\plan{Latency between the stimulus and the recorded timestamp for A and B as minimum, mean, 99th percentile, maximum and standard deviation (Figure~\ref{fig:latency}).}
+
+\begin{figure}[h]
+    \centering
+    \figbox{fig-latency}{0.75\textwidth}{4.5cm}{Histogram or CDF of the latency for A and B.}
+    \caption{Timestamp latency of A and B.}
+    \label{fig:latency}
+\end{figure}
+
+\subsection{Experiment 2: ordering of nearly simultaneous inputs}
+\plan{The fraction of wrong decisions and ties as a function of the offset between the two inputs, for A and B (Figure~\ref{fig:order-error}).}
+
+\begin{figure}[h]
+    \centering
+    \figbox{fig-order-error}{0.75\textwidth}{4.5cm}{Wrong-decision and tie rate versus offset, one curve for A and one for B.}
+    \caption{Wrong decisions versus the offset between the two inputs.}
+    \label{fig:order-error}
+\end{figure}
+
+% =====================================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\plan{What the results mean for the fairness of the game, the limitations (R4, R6, R9, the fixed delay before the cue, the 1~ms accuracy of the potentiometer, the loopback test), and what we learned.}
+
+% =====================================================================
+\section{Conclusion and Future Work}
+\label{sec:conclusion}
+
+\plan{One paragraph on whether the timestamp method decides the winner, followed by the main future work.}
+
+% =====================================================================
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+% =====================================================================
+\appendix
+
+\section{Pin Map}
+\label{app:pins}
+
+\begin{table}[h]
+    \centering
+    \small
+    \renewcommand{\arraystretch}{1.15}
+    \begin{tabularx}{\textwidth}{@{}l l l X@{}}
+        \toprule
+        \textbf{MCU pin} & \textbf{Header} & \textbf{Function} & \textbf{Use} \\
+        \midrule
+        PA10 & D2  & EXTI, falling, pull-up         & Player 1 button \\
+        PB4  & D5  & EXTI, both edges, pull-up      & Player 1 switch \\
+        PA0  & A0  & ADC1\_IN0                      & Player 1 potentiometer \\
+        PA8  & D7  & EXTI, falling, pull-up         & Player 2 button \\
+        PA9  & D8  & EXTI, both edges, pull-up      & Player 2 switch \\
+        PA1  & A1  & ADC1\_IN1                      & Player 2 potentiometer \\
+        PC7  & D9  & GPIO output                    & Cue LED, button (shared by both players) \\
+        PB8  & D15 & GPIO output                    & Cue LED, switch (shared) \\
+        PB9  & D14 & GPIO output                    & Cue LED, potentiometer (shared) \\
+        PB3  & D3  & SPI1\_SCK                      & 74HC595 shift clock \\
+        PB5  & D4  & SPI1\_MOSI                     & 74HC595 data (first chip: player 2 display) \\
+        PB10 & D6  & GPIO output                    & 74HC595 latch \\
+        PB6  & D10 & TIM4\_CH1 (PWM)                & Passive buzzer \\
+        PA2, PA3 & D1, D0 & USART2                  & Serial log over the ST-LINK USB cable \\
+        PC13 & --  & EXTI, falling                  & Blue button B1: start and restart \\
+        \bottomrule
+    \end{tabularx}
+    \caption{Pins used by the game.}
+    \label{tab:pins}
+\end{table}
+
+\section{Source Code}
+\label{app:code}
+
+\plan{Excerpts of \texttt{main.c} that the report discusses, taken from \texttt{code/main\_excerpt.c}.}
+
+\IfFileExists{code/main_excerpt.c}{\lstinputlisting[language=C]{code/main_excerpt.c}}{\todo{Add code/main\_excerpt.c.}}
+
+\end{document}
