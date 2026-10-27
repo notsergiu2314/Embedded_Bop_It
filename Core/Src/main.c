@@ -65,7 +65,6 @@ typedef struct {
 
 // Game settings
 #define SCORE_THRESHOLD 9
-#define TWIST_ENABLED   1      // 0 = TWIST is never asked (only BOP and PULL), e.g. to test without the pots
 #define ROUND_PAUSE_MS  1000   // pause before every round so the players can get ready
 #define DEBOUNCE_MS     30     // after a button/switch edge, further edges on that pin are ignored for this long
 #define TWIST_THRESHOLD 1000   // ADC counts (of 4095) a pot must move from its position at the cue
@@ -161,7 +160,7 @@ uint16_t pin_buzzer;
 
 /* USER CODE END PV */
 
-// ---- Buzzer: passive piezo, TIM4 channel 1 PWM on PB6. The timer counts at 1 MHz. ----
+// Buzzer with 1 MHz timer
 void buzzer_tone(uint32_t hz)
 {
   if (hz == 0) {
@@ -192,7 +191,7 @@ uint32_t random(uint32_t seed)
 
 State get_random_gameState() {
   size_t state_count = 3;
-  return (State) (random(HAL_GetTick() % state_count;))
+  return (State) (random(HAL_GetTick() % state_count));
 }
 
 void buzz_once()
@@ -238,6 +237,20 @@ void display_show(size_t score1, size_t score2)
   HAL_GPIO_WritePin(LATCH_595_GPIO_Port, LATCH_595_Pin, GPIO_PIN_RESET);
 }
 
+// UART log (115200 baud, ST-LINK virtual COM port).
+void uart_printf(const char *fmt, ...)
+{
+  char buf[160];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+  if (n > 0) {
+    HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)(n < (int)sizeof buf ? n : (int)sizeof buf - 1), 100);
+  }
+}
+
+
 void round_manager(void *args) {
   // initialize all relevant registers, pins, and variables
   for (;;) {
@@ -261,8 +274,8 @@ void round_manager(void *args) {
     xQueueReceive(io_manager_result, &timeResult, portMAX_DELAY)
 
     // determine winner
-    p1_time = timeResult.player1_time;
-    p2_time = timeResult.player2_time;
+    uint32_t p1_time = timeResult.player1_time;
+    uint32_t p2_time = timeResult.player2_time;
     
     //TODO: store timings somewhere
 
@@ -501,7 +514,7 @@ int main(void)
   MX_TIM2_Init();
   MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
-
+  game_init();
   /* USER CODE END 2 */
 
   /* Init scheduler */
