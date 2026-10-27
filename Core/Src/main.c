@@ -431,6 +431,14 @@ void round_manager(void *args) {
         winner = 2;
       }
 
+      // best reaction time of each player (in-time reactions only)
+      if (r1 == REACTION_OK && p1_time < best_time[0]) {
+        best_time[0] = p1_time;
+      }
+      if (r2 == REACTION_OK && p2_time < best_time[1]) {
+        best_time[1] = p2_time;
+      }
+
       // update scores and tell the score manager
       xSemaphoreTake(scoreMutex, portMAX_DELAY);
       if (winner == 1) {
