@@ -616,8 +616,7 @@ static Player_Args player2_args;
 
 void game_init(void)
 {
-  // ADC + DMA (circular) keep pot_raw up to date. The DMA interrupt is not needed and would fire
-  // about 200 000 times per second, so it is switched off in the NVIC (the transfers keep running).
+  // Let potentiometer use DMA for faster polling
   if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)pot_raw, 2) != HAL_OK) {
     Error_Handler();
   }
@@ -627,7 +626,7 @@ void game_init(void)
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
   buzzer_tone(0);
 
-  // displays: 0 - 0
+  // show 0 on displays
   display_show(0, 0);
 
   gameStateMutex = xSemaphoreCreateMutex();
