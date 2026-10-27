@@ -29,6 +29,10 @@
 #include "stm32f4xx_hal.h"
 #include "timers.h"
 
+#include <stdbool.h>
+#include <stdarg.h>
+#include <stdio.h>
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -122,6 +126,7 @@ TaskHandle_t io_manager_handle = NULL;
 TaskHandle_t player1_handle = NULL;
 TaskHandle_t player2_handle = NULL;
 TaskHandle_t score_manager_handle = NULL;
+TaskHandle_t pot_monitor_handle = NULL;
 
 // Handles for queues
 
@@ -462,7 +467,7 @@ void round_manager(void *args) {
     for (uint32_t i = 0; i < sizeof(notes) / sizeof(notes[0]); i++) {
       GPIO_PinState pinState = (i % 2 == 0) ? GPIO_PIN_SET : GPIO_PIN_RESET;
 
-      set_all_leds(&led_twist, pinState);
+      set_all_leds(pinState);
       buzz(notes[i], 150);
     }
 
@@ -624,13 +629,13 @@ void game_init(void)
 
   Player_Args player1_args  = {
     .inputQueue = player1_input,
-    .resultQueue = player1_result;
-  }
+    .resultQueue = player1_result
+  };
 
   Player_Args player2_args  = {
     .inputQueue = player2_input,
-    .resultQueue = player2_result;
-  }
+    .resultQueue = player2_result
+  };
 
   // Create all tasks with error handling.
   if (xTaskCreate(io_manager, "io_manager", STACK_WORDS, NULL, PRIO_IO, &io_manager_handle) != pdPASS ||
